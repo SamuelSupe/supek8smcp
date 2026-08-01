@@ -1,6 +1,6 @@
 module github.com/samuelsupe/supek8smcp
 
-go 1.25.0
+go 1.25.12
 
 require (
 	github.com/modelcontextprotocol/go-sdk v1.6.1

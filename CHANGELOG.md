@@ -19,6 +19,7 @@ All notable changes to supek8smcp are documented here. This project follows [Kee
 - Added bounded non-watch resource/discovery/OpenAPI responses, paged list reads, schema field-path-first expansion with a 10,000-node budget and recursive `$ref` termination, bounded logs/exec/attach, and plan-store budgets.
 - Added per-identity rate limiting, stable audit outcomes, and failure-safe revision routing: invalid authentication, TLS, configuration, or resource reconciliation leaves the Service without a backend and scales the Server down.
 - Hardened TLS key/trust-chain/SAN/usage validation and serving-leaf rotation/root-replacement behavior.
+- Pinned release and container builds to Go 1.25.12 so reachable standard-library security fixes are present in every published artifact.
 - Added same-name ownership guards: unowned ServiceAccounts, Services, ConfigMaps, Deployments, NetworkPolicies, and managed TLS Secrets are never adopted, deleted, or scaled, and TokenReview binding waits for an owned Server ServiceAccount; CR names are constrained to 63-character lowercase DNS Service labels.
 - Kept catalog discovery concurrency safe: partial discovery results are returned without poisoning the shared cache, stale complete snapshots survive partial/failed discovery, and concurrent cold loads do not hold the cache mutex during network discovery.
 

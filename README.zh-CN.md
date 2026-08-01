@@ -10,7 +10,7 @@
 [![CI](https://github.com/samuelsupe/supek8smcp/actions/workflows/ci.yml/badge.svg)](https://github.com/samuelsupe/supek8smcp/actions/workflows/ci.yml)
 [![Release](https://github.com/samuelsupe/supek8smcp/actions/workflows/release.yml/badge.svg)](https://github.com/samuelsupe/supek8smcp/actions/workflows/release.yml)
 [![GHCR](https://img.shields.io/badge/GHCR-container-2496ED?logo=docker&logoColor=white)](https://github.com/samuelsupe/supek8smcp/pkgs/container/supek8smcp)
-[![Go](https://img.shields.io/badge/go-1.25-00ADD8?logo=go&logoColor=white)](go.mod)
+[![Go](https://img.shields.io/badge/go-1.25.12-00ADD8?logo=go&logoColor=white)](go.mod)
 
 `supek8smcp` 监听 `mcp.supek8smcp.io/v1alpha1/KubernetesMCPServer` 资源（简称 `kmcp`）。每个资源创建一个 HTTPS MCP Server、`ClusterIP` Service、TLS 材料，以及该 Server 所需的最小 TokenReview 绑定。Server 校验客户端的 Kubernetes Bearer Token，再使用同一个 Token 访问 Kubernetes API；端点不能授予调用者原本没有的 Kubernetes 权限。
 
