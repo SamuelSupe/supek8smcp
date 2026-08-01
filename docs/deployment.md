@@ -1,25 +1,18 @@
-# 部署指南
+# Deployment guide
 
-本文说明如何安装 `supek8smcp` Operator、创建 `KubernetesMCPServer`，并让
-MCP 客户端通过 HTTPS Streamable HTTP 访问它。示例假设使用 `kubectl`、一个
-可被集群拉取的镜像仓库，以及 `platform` 命名空间；请按实际环境替换。
+This guide installs the `supek8smcp` Operator, creates a `KubernetesMCPServer`, and connects an MCP client over HTTPS Streamable HTTP. Examples use `kubectl`, an image registry reachable by the cluster, and a `platform` workload namespace; replace them for your environment.
 
-## 前置条件
+## Prerequisites
 
-- Kubernetes 集群可用，客户端版本支持 `kubectl create token`（老版本可用
-  等价的短期 ServiceAccount Token 方案）。
-- 具备安装 CRD、创建 namespace/RBAC/Deployment/Service/ConfigMap/Secret 和
-  NetworkPolicy 的管理员权限。
-- 部署清单需提供 `supek8smcp-tokenreviewer` ClusterRole（允许 Server ServiceAccount
-  创建 TokenReview；Operator 为每个 CR 创建对应 ClusterRoleBinding）。Operator
-  的 ClusterRole 只允许对这个固定 `resourceName` 使用 `bind`，本身不拥有
-  `tokenreviews.create`，也不会代持客户端 Bearer Token。
-- 集群节点能拉取 Operator 镜像；若使用私有仓库，先配置 imagePullSecret。
-- MCP 客户端支持 Streamable HTTP、Bearer header 和自定义 CA。
+- A Kubernetes cluster and a `kubectl` version that supports `kubectl create token` (use an equivalent short-lived ServiceAccount token flow on older clusters).
+- Administrator permission to install the CRD and create namespaces, RBAC, Deployments, Services, ConfigMaps, Secrets, and NetworkPolicies.
+- The deployment manifests must provide the fixed `supek8smcp-tokenreviewer` ClusterRole. It lets a Server ServiceAccount create TokenReviews; the Operator creates one corresponding ClusterRoleBinding per CR. The Operator ClusterRole may only `get` and `bind` that fixed `resourceName`; it does not have `tokenreviews.create` and never holds a client Bearer token. The Operator verifies that the role is not aggregated and contains no extra rules. If the role is missing, unverifiable, expanded, or an existing binding points at another role, abnormal bindings are removed and `AuthReady=False` is reported.
+- Cluster nodes can pull the Operator and Server images. Configure an imagePullSecret first for a private registry.
+- An MCP client that supports Streamable HTTP, a Bearer header, and a custom CA.
 
-## 安装 Operator
+## Install the Operator
 
-从源码构建并发布镜像：
+Build and publish an image:
 
 ```bash
 export IMG=registry.example.com/platform/supek8smcp:0.1.0
@@ -27,7 +20,7 @@ make docker-build IMG="$IMG"
 docker push "$IMG"
 ```
 
-然后安装 CRD 并部署 Operator：
+Install the CRD and deploy the Operator:
 
 ```bash
 make install
@@ -35,49 +28,35 @@ make deploy IMG="$IMG"
 kubectl -n supek8smcp-system get deploy,pods
 ```
 
-`make deploy` 创建 Operator 的命名空间、RBAC 和 Deployment，并把 `IMG` 同时
-写入 Operator 容器的 `image` 与 `--server-image` 参数。安装/部署目标分别对应
-`config/crd/bases`、`config/rbac`、`config/manager` 和 `config/default` 下的
-清单。预览或审计变更时，可以先
-运行 `make manifests`，再检查生成的 YAML；不要手工编辑生成文件。卸载时：
+`make deploy` creates the Operator namespace, RBAC, and Deployment, and writes `IMG` to both the Operator container's `image` and its `--server-image` argument. The install/deploy targets use manifests under `config/crd/bases`, `config/rbac`, `config/manager`, and `config/default`. To review generated changes, run `make manifests` and inspect the YAML; do not edit generated files by hand. Remove an installation with:
 
 ```bash
 make undeploy
 make uninstall
 ```
 
-卸载前先删除各命名空间中的 `KubernetesMCPServer`，等待其 finalizer 清理
-TokenReview binding 和工作负载；否则 Operator 已停止时，CRD 删除可能因
-finalizer 无法完成。
+Before uninstalling, delete every `KubernetesMCPServer` and wait for its finalizer to remove TokenReview bindings and workloads. If the Operator is stopped first, CRD deletion can remain blocked by that finalizer.
 
-Operator 容器运行 `supek8smcp operator`，必须通过 `--server-image` 或
-`SUPEK8SMCP_SERVER_IMAGE` 指定它为每个 CR 创建的 Server 镜像。默认参数为：
-Operator metrics `:8080`、health probe `:8081`、leader election 开启；
-Operator 命名空间取 `POD_NAMESPACE`，未设置时为 `supek8smcp-system`。Server
-容器运行 `supek8smcp serve`，默认读取 `/etc/supek8smcp/config/config.json`，
-在 `:8443` 提供 HTTPS MCP、在 `:9090` 提供 metrics/health；证书路径为
-`/etc/supek8smcp/tls/tls.crt` 和 `/etc/supek8smcp/tls/tls.key`。如通过自定义
-镜像或清单覆盖这些参数，必须保持探针和端口契约一致。
+The Operator runs `supek8smcp operator` and must receive `--server-image` or `SUPEK8SMCP_SERVER_IMAGE` for the image it creates for each CR. Defaults are Operator metrics `:8080`, health probe `:8081`, and leader election enabled; the Operator namespace is `POD_NAMESPACE` or `supek8smcp-system` when unset. A Server runs `supek8smcp serve`, reads `/etc/supek8smcp/config/config.json`, serves HTTPS MCP on `:8443` and metrics/health on `:9090`, and reads certificates from `/etc/supek8smcp/tls/tls.crt` and `/etc/supek8smcp/tls/tls.key`. Custom images or manifests must preserve these probe and port contracts.
 
-卸载 CRD 会删除该 CRD 下的自定义资源及其由 Operator 管理的工作负载；在
-生产集群执行前先备份 CR，并确认保留策略。
+Deleting the CRD deletes its custom resources and Operator-managed workloads. Back up CRs and confirm the retention policy before doing this in production.
 
-## 创建 CR
+## Create a CR
 
-每个 `KubernetesMCPServer` 是 namespaced 资源，Operator 为它创建一个单副本
-MCP Server、一个 `ClusterIP` Service，以及证书/CA 相关资源。下面的配置给
-`platform` 命名空间提供 SafeWrite：
+Each `KubernetesMCPServer` is namespaced. The Operator creates one Server replica, one `ClusterIP` Service, and certificate/CA resources. The Server namespace is also the trust boundary for the TLS private key and Service identity: a principal that can create a Pod there may obtain these capabilities by mounting a Secret or forging a Service selector. Use a dedicated, restricted `supek8smcp-servers` namespace and do not grant ordinary tenants Pod/Deployment creation. The example below puts the endpoint there and grants SafeWrite over two workload namespaces:
 
-仓库中的最小只读样例位于
-`config/samples/mcp_v1alpha1_kubernetesmcpserver.yaml`；以下示例额外展示
-范围、写策略和资源预算。
+```bash
+kubectl create namespace supek8smcp-servers
+```
+
+The minimal read-only sample is [`config/samples/mcp_v1alpha1_kubernetesmcpserver.yaml`](../config/samples/mcp_v1alpha1_kubernetesmcpserver.yaml). This example also shows scope, write policy, and resource budgets:
 
 ```yaml
 apiVersion: mcp.supek8smcp.io/v1alpha1
 kind: KubernetesMCPServer
 metadata:
   name: platform-ops
-  namespace: platform
+  namespace: supek8smcp-servers
 spec:
   mode: SafeWrite
   scope:
@@ -104,79 +83,71 @@ spec:
     maxOutputBytes: 1048576
     maxListItems: 100
     maxConcurrent: 4
+    requestsPerMinute: 120
+    burst: 20
   networkPolicy:
     enabled: true
+    allowedNamespaceSelector:
+      matchExpressions:
+        - key: kubernetes.io/metadata.name
+          operator: In
+          values: [platform, platform-staging]
 ```
 
-资源名称与标签便于审计和选择：Deployment、ServiceAccount、Service、NetworkPolicy
-使用 CR 名称；配置/CA ConfigMap 分别为 `<name>-config`、`<name>-ca`；默认自管
-叶子 Secret 为 `<name>-tls`；TokenReview 的 ClusterRoleBinding 名称为
-`supek8smcp-<sha256(namespace/name) 前 8 字节>`。这些资源带有以下标签：
-`app.kubernetes.io/name=supek8smcp-server`、
-`app.kubernetes.io/instance=<name>`、
-`app.kubernetes.io/managed-by=supek8smcp-operator`。
+`metadata.name` is admitted only when it is at most 63 characters and is a lowercase DNS Service label: it starts with a letter, ends with a letter or digit, and contains only lowercase letters, digits, and hyphens. Names and labels make auditing and selection predictable. Deployment, ServiceAccount, Service, and NetworkPolicy use the CR name; the configuration and CA ConfigMaps are `<name>-config` and `<name>-ca`; the default managed leaf Secret is `<name>-tls`; the TokenReview ClusterRoleBinding is `supek8smcp-<first 8 bytes of sha256(namespace/name)>`. Managed resources carry:
 
-`allowClusterScopedWrite: true` 只有在 `Dangerous` 模式才是合法配置。即使
-CR 的 `policy.rules` 允许某个动作，请求 Bearer Token 仍必须在 Kubernetes
-RBAC 中拥有对应权限；最终权限是两者的交集。留空 `policy.rules` 时采用该
-模式的保守默认能力，不能借此扩大 Token 权限。`verbs` 除 Kubernetes 原生动词
-外，也可使用 `k8s.search` 返回的逻辑 action，例如 `logs`、`scale`、`restart`、
-`apply`、`exec`、`attach`。
+```text
+app.kubernetes.io/name=supek8smcp-server
+app.kubernetes.io/instance=<name>
+app.kubernetes.io/managed-by=supek8smcp-operator
+```
 
-NetworkPolicy 默认只限制入站到 MCP `8443` 和 metrics/health `9090`。未设置
-来源选择器时允许同命名空间 Pod；`allowedNamespaceSelector` 和
-`allowedPodSelector` 可按命名空间/Pod 标签收窄来源，同时设置时取交集。该
-策略不限制 Egress，因此 Server 到 kube-apiserver、DNS 和 TokenReview 的出站
-路径仍需由集群网络策略和防火墙保证。
+Before reconciling any same-name object, the Operator requires a controller ownerReference to this CR. It never adopts, deletes, or scales an unowned same-name ServiceAccount, Service, ConfigMap, Deployment, NetworkPolicy, or managed TLS Secret. The TokenReview binding is created only after the Server ServiceAccount exists and is owned by this CR; an ownership conflict leaves the endpoint disabled and the Server scaled to zero.
 
-应用并观察状态：
+`allowClusterScopedWrite: true` is valid only in `Dangerous` mode. Even when `policy.rules` allows an action, the request Bearer token must have the corresponding Kubernetes RBAC permission; effective permission is the intersection. An empty rule set selects conservative mode defaults and cannot expand token permissions. Besides Kubernetes verbs, `verbs` may contain logical actions returned by `k8s.search`, such as `logs`, `scale`, `restart`, `apply`, `exec`, and `attach`.
+
+If a Role uses `resourceNames`, pass the target `name` to `k8s.search` so its SelfSubjectAccessReview checks the object name. The Server cannot modify its own CR, configuration/CA/TLS, Deployment, Service, ServiceAccount, NetworkPolicy, or TokenReview RBAC objects. All `KubernetesMCPServer` CRs and any other resource with `app.kubernetes.io/managed-by=supek8smcp-operator` are protected as managed resources. Even a permissive Dangerous policy and client RBAC return `managed_resource_denied`.
+
+The generated NetworkPolicy is ingress-only: it covers MCP `8443` and metrics/health `9090`. Without a source selector, same-namespace Pods are allowed. `allowedNamespaceSelector` and `allowedPodSelector` can narrow sources by namespace and Pod labels; setting both takes their intersection. The policy declares no Egress, so kube-apiserver, DNS, and TokenReview egress must be allowed by other cluster policies and firewalls.
+
+Apply and observe the resource:
 
 ```bash
 kubectl apply -f kubernetesmcpserver.yaml
-kubectl -n platform get kmcp platform-ops -o wide
-kubectl -n platform describe kmcp platform-ops
-kubectl -n platform get deploy,svc,pods,secret,configmap \
+kubectl -n supek8smcp-servers get kmcp platform-ops -o wide
+kubectl -n supek8smcp-servers describe kmcp platform-ops
+kubectl -n supek8smcp-servers get deploy,svc,pods,secret,configmap \
   -l app.kubernetes.io/instance=platform-ops
 ```
 
-等待 `status.conditions` 中的 `Ready=True`，并从 `status.endpoint` 读取实际
-访问地址。若使用 Operator 自管 TLS，`status.caConfigMapName` 是客户端应信任
-的 CA ConfigMap 名称。正常调谐还会报告 `TLSReady=True`（证书已就绪）和
-`AuthReady=True`（TokenReview ClusterRoleBinding 已配置）；这些条件反映的是
-Operator 已完成资源编排，不替代对实际 Token/RBAC 的授权检查。
+Wait for `status.conditions` to contain `Ready=True` and read the actual endpoint from `status.endpoint`. With Operator-managed TLS, `status.caConfigMapName` names the CA ConfigMap clients must trust. A healthy reconciliation also reports `TLSReady=True` and `AuthReady=True`; these conditions mean that resource orchestration is complete, not that a particular client token is authorized.
 
-## TLS 选择和 CA 分发
+The Service selector and Server Pod include a revision derived from the CR UID/generation, Server image, configuration, and TLS material. A new revision is not selected until it is ready. If authentication, TLS, configuration, or resource reconciliation fails, the Operator selects a no-backend revision and scales the Server Deployment to zero; the next complete reconciliation reopens the endpoint after the cause is fixed.
 
-### Operator 自管证书（默认）
+## TLS selection and CA distribution
 
-省略 `spec.tls.secretName` 或设为空对象时，Operator 创建并轮换服务端叶子
-证书和 CA。将 `status.caConfigMapName` 指向的 ConfigMap 以只读方式分发给
-客户端：
+### Operator-managed certificates (default)
+
+When `spec.tls.secretName` is omitted or empty, the Operator creates a shared root CA and creates or rotates the serving leaf certificate. The root CA is not replaced before expiry automatically; planned root replacement requires an operator to delete or replace the shared Secret and refresh client trust. Distribute the ConfigMap named by `status.caConfigMapName` to clients read-only:
 
 ```bash
-CA_CONFIGMAP="$(kubectl -n platform get kmcp platform-ops \
+CA_CONFIGMAP="$(kubectl -n supek8smcp-servers get kmcp platform-ops \
   -o jsonpath='{.status.caConfigMapName}')"
-kubectl -n platform get configmap "$CA_CONFIGMAP" -o yaml
+kubectl -n supek8smcp-servers get configmap "$CA_CONFIGMAP" \
+  -o jsonpath='{.data.ca\.crt}' > ca.crt
 ```
 
-Operator 命名空间中还会保留共享的 `supek8smcp-serving-ca` Secret（`ca.crt`/
-`ca.key`），它不是每个 CR 的 owner resource。请像长期密钥材料一样限制读取并
-备份；删除它会触发重建，现有仍有效的叶子会暂时继续使用原 CA，但后续叶子
-轮换会切换到新 CA，客户端必须刷新对应 CA ConfigMap。删除 CR 或执行
-`make undeploy` 不会自动清理这个共享 CA，确需轮换时应安排客户端刷新 CA。
+The Operator namespace retains a shared `supek8smcp-serving-ca` Secret (`ca.crt`/`ca.key`) that is not owned by an individual CR. Treat it as long-lived key material: restrict reads and back it up. Managed leaves always chain to the current Operator CA. Only a managed TLS Secret whose controller ownerReference points to the same CR may be validated or rotated; an unowned same-name `<name>-tls` Secret is rejected and the endpoint fails closed. Deleting the root Secret creates a new root and re-signs owned leaves; clients must refresh each CA ConfigMap. Deleting a CR or running `make undeploy` does not remove this shared CA automatically; schedule a client CA refresh if you deliberately rotate it.
 
-自管根 CA 的有效期约为 5 年，单个服务叶子证书约为 90 天；Operator 在叶子
-剩余不足 30 天时重新签发。轮换后客户端只需继续信任对应的 CA ConfigMap，
-但应确保连接池能够重新建立 TLS 连接。
+The managed root CA is valid for about five years and a serving leaf for about 90 days. A leaf is reissued when fewer than 30 days remain. Clients only need to continue trusting the CA ConfigMap, but connection pools must be able to establish a new TLS connection after rotation.
 
-应用或脚本应在 CA 轮换时重新读取 ConfigMap；不要把叶子私钥复制给 MCP
-客户端。证书异常时先检查 Operator 事件、ConfigMap/Secret 是否存在以及
-Server Pod 是否挂载了最新版本。
+Applications and scripts should re-read the ConfigMap on CA rotation. Never copy the leaf private key to an MCP client. For certificate failures, inspect Operator events, ConfigMap/Secret presence, and the mounted version in the Server Pod.
 
-### 使用已有 TLS Secret
+To avoid listing, watching, or caching every Secret in the cluster, an external TLS Secret is read as one object and checked on roughly a five-minute reconciliation period. Do not assume a Secret event triggers an immediate update; wait for the next complete reconciliation and confirm that the Deployment TLS hash changed.
 
-将 `spec.tls.secretName` 设置为同一命名空间内、按 Kubernetes TLS 约定创建的
-`kubernetes.io/tls` Secret：
+### Use an existing TLS Secret
+
+Set `spec.tls.secretName` to a same-namespace Secret that follows the Kubernetes TLS convention:
 
 ```yaml
 spec:
@@ -184,16 +155,11 @@ spec:
     secretName: platform-ops-tls
 ```
 
-Secret 必须包含 `tls.crt`、`tls.key` 和 `ca.crt`，且必须是
-`kubernetes.io/tls` 类型。Operator 会校验密钥匹配、`ca.crt` 信任链、有效期、
-ServerAuth 用途和 `<name>.<namespace>.svc` SAN；校验失败时 `TLSReady=False`，
-不会继续提供 Ready Server。Operator 不会把该 Secret 的私钥写入 CR 状态；负责
-轮换和续期的是你的证书管理流程。客户端仍需配置 `ca.crt`（Operator 会将它发布
-到 `status.caConfigMapName` 指向的 ConfigMap）。
+The Secret must be type `kubernetes.io/tls` and contain `tls.crt`, `tls.key`, and `ca.crt`. The Operator verifies key matching, the `ca.crt` trust chain, validity, ServerAuth usage, and the `<name>.<namespace>.svc` SAN. Any failure sets `TLSReady=False` and prevents a Ready Server. The private key is not written to CR status; your certificate process owns renewal. Clients still use `ca.crt`, which the Operator publishes through `status.caConfigMapName`.
 
-## Bearer Token 和客户端连接
+## Bearer tokens and client connection
 
-为每个集成建立独立 ServiceAccount 和最小 RBAC，不要复用管理员 token。示例：
+Create a separate ServiceAccount and least-privilege RBAC binding per integration; do not reuse an administrator token:
 
 ```bash
 kubectl -n platform create serviceaccount mcp-client
@@ -204,82 +170,92 @@ kubectl create rolebinding mcp-client-read \
 TOKEN="$(kubectl -n platform create token mcp-client --duration=1h)"
 ```
 
-短期 token 通过 `Authorization: Bearer <token>` 发送。服务端会对 token 做
-TokenReview，然后用同一 token 访问 kube-apiserver，因此客户端不能只依靠 CR
-中的 `policy.rules` 获得额外 Kubernetes 权限。token 应由 Secret 管理器注入，
-并设置过期/轮换策略。
+Send a short-lived token in `Authorization: Bearer <token>`. The Server performs TokenReview and then calls kube-apiserver with that same token, so `policy.rules` cannot grant extra Kubernetes permissions. Inject tokens through a Secret manager and configure expiry and rotation.
 
-客户端配置的 URL 以 `status.endpoint` 为准；集群内默认形状为：
+Use `status.endpoint`; the in-cluster shape is usually:
 
 ```text
 https://<service>.<namespace>.svc:8443/mcp
 ```
 
-配置 `ca.crt`、Bearer header 和 Streamable HTTP transport。不要关闭 TLS 校验、
-把 token 放进 URL query 或让反向代理记录 `Authorization` header。
+Configure the CA, Bearer header, and Streamable HTTP transport. Do not disable TLS verification, put a token in a URL query, or let a reverse proxy log the `Authorization` header.
 
-## 运行时检查
+## Runtime checks
 
 ```bash
-kubectl -n platform get kmcp platform-ops \
+kubectl -n supek8smcp-servers get kmcp platform-ops \
   -o jsonpath='{.status.endpoint}{"\n"}{.status.caConfigMapName}{"\n"}'
-kubectl -n platform get events --sort-by=.lastTimestamp \
+kubectl -n supek8smcp-servers get events --sort-by=.lastTimestamp \
   --field-selector involvedObject.name=platform-ops
 kubectl -n supek8smcp-system logs deploy/supek8smcp-controller-manager \
   -c manager --tail=200
 ```
 
-先确认 Operator Deployment 健康，再确认 CR 的 `Ready` 条件、Service endpoints
-和 Server Pod。MCP 客户端应记录请求 ID/错误类别，不要记录 token、Secret 内容
-或 exec 输出中的敏感数据。
+Check the Operator Deployment first, then the CR `Ready` condition, Service endpoints, and Server Pod. MCP clients should record request IDs and error categories, never tokens, Secret contents, or sensitive exec output.
 
-## 故障排查
+## Audit, identity rate limiting, and alerts
 
-### CR 一直不是 Ready
+Every authentication and every MCP tool call that passes parameter validation writes one `audit_schema=v1` JSON event to Server stdout. Events include the subject, tool, Kubernetes target, allow/deny/error decision, stable reason, and latency; they exclude tokens, plan IDs, resource/patch bodies, exec commands, stdin, Pod logs, and response bodies:
 
-查看 `kubectl describe kmcp <name> -n <namespace>` 和 Operator 日志。常见原因：
+```bash
+kubectl -n supek8smcp-servers logs deploy/platform-ops --tail=200 | \
+  jq 'select(.msg == "MCP security audit")'
+```
 
-- `spec.tls.secretName` 不存在、类型不是 `kubernetes.io/tls`、缺少 `tls.crt`/
-  `tls.key`/`ca.crt`，或证书密钥、信任链、有效期、ServerAuth/SAN 校验失败；
-- 镜像拉取失败、ServiceAccount/RBAC 不足、NetworkPolicy 阻断 Operator 或
-  Server 到 kube-apiserver 的连接；
-- `allowClusterScopedWrite` 与 `mode` 不匹配，或其他字段未通过 CRD 校验。
+`limits.requestsPerMinute` and `limits.burst` create an independent token bucket for each authenticated Kubernetes identity; defaults are `120` and `20`. Exhaustion returns HTTP `429` with `Retry-After`. `maxConcurrent` remains a global Server guard; both limits apply.
 
-### 客户端 TLS 握手失败
+The Server exposes these security and reliability metrics on `9090/metrics`:
 
-确认客户端使用的是 `status.caConfigMapName` 中的 CA（或外部 TLS Secret 的
-签发 CA），ServerName 与证书 SAN 匹配，且 URL 没有误指向其他 Service。不要
-用 `-k` 掩盖问题；检查证书有效期和 Pod 挂载内容。
+- `supek8smcp_authentication_attempts_total`
+- `supek8smcp_rate_limit_rejections_total`
+- `supek8smcp_audit_events_total`
+- `supek8smcp_tool_calls_total`
+- `supek8smcp_tool_duration_seconds`
 
-### 401/403 或工具返回权限错误
+`supek8smcp_tool_calls_total` labels `result` as `ok`, policy/RBAC `denied`, or infrastructure/execution `error`, so reliability alerts do not mistake expected permission denials for service failures.
 
-401 通常表示缺少/过期/无效 Bearer Token，或 TokenReview 失败；带有浏览器
-`Origin` header 的请求也会被拒绝。403 表示该
-Token 的 RBAC、CR `scope` 或 `policy.rules` 至少有一层拒绝。先用同一身份执行
-`kubectl auth can-i`，再检查命名空间范围、API group/resource/verb 拼写。CR
-更新后等待 Operator 重新调谐并重新读取 `status.conditions`。
+With Prometheus Operator, optionally install the repository's ServiceMonitor and alert rule:
 
-### 写操作被拒绝或 commit 失败
+```bash
+kubectl apply -k config/monitoring
+```
 
-SafeWrite/Dangerous 的持久写必须先调用 `k8s.plan`，并在两分钟内使用同一
-身份调用 `k8s.commit`。计划是一次性的；过期、重复提交、token/请求上下文
-不一致都应重新 plan。ReadOnly 永远不会暴露写工具。
+These resources are not included by default in `make deploy`, which keeps clusters without `monitoring.coreos.com` CRDs deployable. If your Prometheus selects ServiceMonitor/PrometheusRule objects by label, add the cluster's required labels. The default NetworkPolicy allows same-namespace sources only; for Prometheus in another namespace, explicitly allow its `9090` scrape with `allowedNamespaceSelector`/`allowedPodSelector` instead of disabling the whole policy. Tune alert thresholds against the normal traffic baseline.
 
-### exec/attach 失败
+## Troubleshooting
 
-仅 Dangerous 模式支持有界、非交互 exec/attach。确认目标 Pod、容器、输入输出
-大小、并发和 `execTimeout` 均在限制内；TTY、port-forward、cp、proxy、evict
-和 drain 不在第一版支持范围。
+### CR never becomes Ready
 
-### 持续 Pod 日志被拒绝
+Inspect `kubectl describe kmcp <name> -n <namespace>` and Operator logs. Common causes:
 
-`k8s.read` 读取 Pod 日志时，`follow=false` 的一次性结果在三种模式均可用；
-`follow=true` 的持续日志流仅 Dangerous 模式允许。若收到 `mode_denied`，请改用
-一次性读取，或确认 CR 为 Dangerous，并检查 `streamTimeout`、`maxOutputBytes`
-和并发预算。
+- `spec.tls.secretName` is missing, has the wrong type, lacks `tls.crt`/`tls.key`/`ca.crt`, or fails key, trust-chain, validity, ServerAuth, or SAN checks.
+- Image pull failure, insufficient ServiceAccount/RBAC, or NetworkPolicy blocking Operator/Server access to kube-apiserver.
+- `allowClusterScopedWrite` does not match `mode`, or another field fails CRD validation.
 
-## 卸载和数据保留
+### Client TLS handshake fails
 
-先删除引用的 `KubernetesMCPServer`，确认相关 Server、Service、NetworkPolicy
-和证书资源已按预期清理，再执行 `make undeploy`。最后执行 `make uninstall`
-删除 CRD；这一步会删除该 CRD 下的对象，生产环境应先导出 YAML 和审计记录。
+Confirm that the client trusts the CA in `status.caConfigMapName` (or the external Secret's issuing CA), that ServerName matches the certificate SAN, and that the URL points to the intended Service. Do not hide the issue with `-k`; inspect validity and the mounted certificate.
+
+### 401/403 or a tool permission error
+
+401 normally means a missing, expired, or invalid Bearer token; a browser `Origin` header is also rejected. 403 means at least one of token RBAC, CR `scope`, or `policy.rules` denies the action. Run `kubectl auth can-i` as the same identity, check namespace and API group/resource/verb spelling, then wait for reconciliation and re-read `status.conditions` after CR changes.
+
+Resource lists read at most eight upstream objects per call and return `metadata.continue` as the next `k8s.read` `cursor`. Even when `maxListItems` is larger, loop with the cursor so one list cannot exhaust model context or Server memory. Non-watch delegated resources, discovery, and OpenAPI responses also have an 8 MiB hard limit; narrow selectors or schema scope when they are exceeded.
+
+When TokenReview or the delegated client is temporarily unavailable, the Server returns `503` with `tokenreview_error` or `delegated_client_error` in audit/metrics; it does not misreport an infrastructure outage as invalid credentials. Check kube-apiserver connectivity and the Server ServiceAccount's `tokenreviews.create` permission rather than repeatedly changing the client token. Waiting for `maxConcurrent` beyond `requestTimeout` also returns `503` with reason `concurrency_timeout`.
+
+### A write is denied or commit fails
+
+SafeWrite/Dangerous persistent writes must call `k8s.plan` first and call `k8s.commit` within two minutes using the same identity. Plans are one-shot; expiration, duplicate submission, or token/request-context mismatch requires a new plan. ReadOnly never exposes write tools. SafeWrite compares the pre-change object with the kube-apiserver dry-run result; parent replacement, `null`, or omitted fields that remove existing container/Pod security constraints are rejected as `unsafe_payload`. Deliberately weakening a constraint requires an explicitly authorized Dangerous Server and Kubernetes RBAC.
+
+### exec/attach fails
+
+Only Dangerous supports bounded, non-interactive exec/attach. Check the target Pod/container, input/output size, concurrency, and `execTimeout`. TTY, port-forward, `cp`, proxy, evict, and drain are outside the first release.
+
+### Continuous Pod logs are denied
+
+`k8s.read` supports one-shot `follow=false` logs in every mode. `follow=true` is a continuous stream allowed only in Dangerous. For `mode_denied`, use one-shot logs or confirm Dangerous mode and check `streamTimeout`, `maxOutputBytes`, `maxListItems`, and concurrency budgets.
+
+## Uninstall and data retention
+
+Delete each `KubernetesMCPServer` first and confirm its Server, Service, NetworkPolicy, and certificate resources are removed as intended. Then run `make undeploy`, followed by `make uninstall` to delete the CRD. Export YAML and audit records before the CRD deletion in production.

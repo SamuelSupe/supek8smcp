@@ -5,7 +5,7 @@ VERSION ?= 0.1.0
 CONTROLLER_GEN ?= go run sigs.k8s.io/controller-tools/cmd/controller-gen@v0.19.0
 KUSTOMIZE ?= kubectl kustomize --load-restrictor LoadRestrictionsNone
 
-.PHONY: generate manifests fmt vet test build docker-build install uninstall deploy undeploy
+.PHONY: generate manifests fmt vet test build release docker-build install uninstall deploy undeploy
 
 generate:
 	$(CONTROLLER_GEN) object:headerFile="" paths="./api/..."
@@ -25,6 +25,9 @@ test:
 build:
 	mkdir -p bin
 	CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=$(VERSION)" -o bin/supek8smcp ./cmd/supek8smcp
+
+release:
+	VERSION=$(VERSION) ./hack/package-release.sh
 
 docker-build:
 	docker build --build-arg VERSION=$(VERSION) -t $(IMG) .

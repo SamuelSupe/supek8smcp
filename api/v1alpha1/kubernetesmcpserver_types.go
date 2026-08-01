@@ -80,6 +80,17 @@ type LimitsSpec struct {
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=32
 	MaxConcurrent int32 `json:"maxConcurrent,omitempty"`
+	// RequestsPerMinute is the sustained MCP HTTP request budget for each
+	// authenticated Kubernetes identity within one Server pod.
+	// +kubebuilder:default:=120
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=6000
+	RequestsPerMinute int32 `json:"requestsPerMinute,omitempty"`
+	// Burst is the maximum number of requests an identity may issue at once.
+	// +kubebuilder:default:=20
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=1000
+	Burst int32 `json:"burst,omitempty"`
 }
 
 type NetworkPolicySpec struct {
@@ -117,7 +128,11 @@ type KubernetesMCPServerStatus struct {
 // +kubebuilder:printcolumn:name="Mode",type=string,JSONPath=`.spec.mode`
 // +kubebuilder:printcolumn:name="Ready",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].status`
 // +kubebuilder:printcolumn:name="Endpoint",type=string,JSONPath=`.status.endpoint`
+// +kubebuilder:validation:XValidation:rule="size(self.metadata.name) <= 63 && self.metadata.name.matches('^[a-z]([-a-z0-9]*[a-z0-9])?$')",message="metadata.name must be a DNS service label with at most 63 characters"
 // +kubebuilder:validation:XValidation:rule="!has(self.spec.scope) || !has(self.spec.scope.allowClusterScopedWrite) || !self.spec.scope.allowClusterScopedWrite || self.spec.mode == 'Dangerous'",message="cluster-scoped writes require Dangerous mode"
+// +kubebuilder:validation:XValidation:rule="!has(self.spec.limits) || !has(self.spec.limits.requestTimeout) || duration(self.spec.limits.requestTimeout) > duration('0s')",message="requestTimeout must be a positive Kubernetes duration"
+// +kubebuilder:validation:XValidation:rule="!has(self.spec.limits) || !has(self.spec.limits.streamTimeout) || duration(self.spec.limits.streamTimeout) > duration('0s')",message="streamTimeout must be a positive Kubernetes duration"
+// +kubebuilder:validation:XValidation:rule="!has(self.spec.limits) || !has(self.spec.limits.execTimeout) || duration(self.spec.limits.execTimeout) > duration('0s')",message="execTimeout must be a positive Kubernetes duration"
 type KubernetesMCPServer struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
@@ -163,6 +178,12 @@ func (s *KubernetesMCPServer) Default() {
 	}
 	if s.Spec.Limits.MaxConcurrent == 0 {
 		s.Spec.Limits.MaxConcurrent = 4
+	}
+	if s.Spec.Limits.RequestsPerMinute == 0 {
+		s.Spec.Limits.RequestsPerMinute = 120
+	}
+	if s.Spec.Limits.Burst == 0 {
+		s.Spec.Limits.Burst = 20
 	}
 	if s.Spec.NetworkPolicy.Enabled == nil {
 		enabled := true

@@ -31,6 +31,11 @@ type certificateAuthority struct {
 	keyPEM  []byte
 }
 
+type servingCertificateMaterial struct {
+	caBundle []byte
+	revision string
+}
+
 func (r *KubernetesMCPServerReconciler) ensureRootCA(ctx context.Context) (*certificateAuthority, error) {
 	key := types.NamespacedName{Namespace: r.OperatorNamespace, Name: rootCASecretName}
 	secret := &corev1.Secret{}
@@ -68,41 +73,62 @@ func (r *KubernetesMCPServerReconciler) ensureServingCertificate(
 	ctx context.Context,
 	server *mcpv1alpha1.KubernetesMCPServer,
 	ca *certificateAuthority,
-) ([]byte, error) {
+) (servingCertificateMaterial, error) {
 	name := server.TLSSecretName()
 	key := types.NamespacedName{Namespace: server.Namespace, Name: name}
 	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: key.Namespace, Name: key.Name}}
 	if server.Spec.TLS.SecretName != "" {
 		if err := r.Get(ctx, key, secret); err != nil {
-			return nil, fmt.Errorf("get configured TLS Secret: %w", err)
+			return servingCertificateMaterial{}, fmt.Errorf("get configured TLS Secret: %w", err)
 		}
 		if secret.Type != corev1.SecretTypeTLS {
-			return nil, fmt.Errorf("TLS Secret %s must have type %s", name, corev1.SecretTypeTLS)
+			return servingCertificateMaterial{}, fmt.Errorf("TLS Secret %s must have type %s", name, corev1.SecretTypeTLS)
 		}
 		if len(secret.Data[corev1.TLSCertKey]) == 0 || len(secret.Data[corev1.TLSPrivateKeyKey]) == 0 || len(secret.Data["ca.crt"]) == 0 {
-			return nil, fmt.Errorf("TLS Secret %s must contain tls.crt, tls.key, and ca.crt", name)
+			return servingCertificateMaterial{}, fmt.Errorf("TLS Secret %s must contain tls.crt, tls.key, and ca.crt", name)
 		}
 		if err := validateConfiguredTLS(secret, server); err != nil {
-			return nil, fmt.Errorf("validate TLS Secret %s: %w", name, err)
+			return servingCertificateMaterial{}, fmt.Errorf("validate TLS Secret %s: %w", name, err)
 		}
-		return secret.Data["ca.crt"], nil
+		return materialForSecret(secret, secret.Data["ca.crt"]), nil
+	}
+	if ca == nil {
+		return servingCertificateMaterial{}, fmt.Errorf("operator CA is required for a managed serving certificate")
 	}
 
 	err := r.Get(ctx, key, secret)
-	if err == nil && servingCertificateValid(secret, server, 30*24*time.Hour) {
-		return secret.Data["ca.crt"], nil
+	if err == nil {
+		if err := requireControllerOwnership(server, secret); err != nil {
+			return servingCertificateMaterial{}, fmt.Errorf("validate managed serving certificate ownership: %w", err)
+		}
+	}
+	if err == nil && servingCertificateValid(secret, server, ca.certPEM, 30*24*time.Hour) {
+		if _, err := controllerutil.CreateOrUpdate(ctx, r.Client, secret, func() error {
+			if err := requireControllerOwnership(server, secret); err != nil {
+				return err
+			}
+			secret.Labels = server.ServerLabels()
+			return controllerutil.SetControllerReference(server, secret, r.Scheme)
+		}); err != nil {
+			return servingCertificateMaterial{}, fmt.Errorf("reconcile serving certificate metadata: %w", err)
+		}
+		return materialForSecret(secret, ca.certPEM), nil
 	}
 	if err != nil && !apierrors.IsNotFound(err) {
-		return nil, fmt.Errorf("get serving certificate: %w", err)
+		return servingCertificateMaterial{}, fmt.Errorf("get serving certificate: %w", err)
 	}
 
 	certPEM, keyPEM, err := ca.signServer(server)
 	if err != nil {
-		return nil, err
+		return servingCertificateMaterial{}, err
 	}
 	_, err = controllerutil.CreateOrUpdate(ctx, r.Client, secret, func() error {
+		if err := requireControllerOwnership(server, secret); err != nil {
+			return err
+		}
 		secret.Namespace = server.Namespace
 		secret.Name = name
+		secret.Labels = server.ServerLabels()
 		secret.Type = corev1.SecretTypeTLS
 		secret.Data = map[string][]byte{
 			corev1.TLSCertKey:       certPEM,
@@ -112,12 +138,27 @@ func (r *KubernetesMCPServerReconciler) ensureServingCertificate(
 		return controllerutil.SetControllerReference(server, secret, r.Scheme)
 	})
 	if err != nil {
-		return nil, fmt.Errorf("reconcile serving certificate: %w", err)
+		return servingCertificateMaterial{}, fmt.Errorf("reconcile serving certificate: %w", err)
 	}
-	return ca.certPEM, nil
+	return materialForSecret(secret, ca.certPEM), nil
+}
+
+func materialForSecret(secret *corev1.Secret, caBundle []byte) servingCertificateMaterial {
+	return servingCertificateMaterial{
+		caBundle: caBundle,
+		revision: digestParts(
+			secret.Data[corev1.TLSCertKey],
+			secret.Data[corev1.TLSPrivateKeyKey],
+			[]byte(secret.ResourceVersion),
+		),
+	}
 }
 
 func validateConfiguredTLS(secret *corev1.Secret, server *mcpv1alpha1.KubernetesMCPServer) error {
+	return validateServingTLS(secret, server, secret.Data["ca.crt"])
+}
+
+func validateServingTLS(secret *corev1.Secret, server *mcpv1alpha1.KubernetesMCPServer, caBundle []byte) error {
 	pair, err := tls.X509KeyPair(secret.Data[corev1.TLSCertKey], secret.Data[corev1.TLSPrivateKeyKey])
 	if err != nil {
 		return fmt.Errorf("parse certificate and private key: %w", err)
@@ -130,7 +171,7 @@ func validateConfiguredTLS(secret *corev1.Secret, server *mcpv1alpha1.Kubernetes
 		return fmt.Errorf("parse serving certificate: %w", err)
 	}
 	roots := x509.NewCertPool()
-	if !roots.AppendCertsFromPEM(secret.Data["ca.crt"]) {
+	if !roots.AppendCertsFromPEM(caBundle) {
 		return fmt.Errorf("ca.crt contains no certificate")
 	}
 	intermediates := x509.NewCertPool()
@@ -247,8 +288,8 @@ func (ca *certificateAuthority) signServer(server *mcpv1alpha1.KubernetesMCPServ
 		pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER}), nil
 }
 
-func servingCertificateValid(secret *corev1.Secret, server *mcpv1alpha1.KubernetesMCPServer, remaining time.Duration) bool {
-	if secret.Type != corev1.SecretTypeTLS || validateConfiguredTLS(secret, server) != nil {
+func servingCertificateValid(secret *corev1.Secret, server *mcpv1alpha1.KubernetesMCPServer, caBundle []byte, remaining time.Duration) bool {
+	if secret.Type != corev1.SecretTypeTLS || validateServingTLS(secret, server, caBundle) != nil {
 		return false
 	}
 	pair, err := tls.X509KeyPair(secret.Data[corev1.TLSCertKey], secret.Data[corev1.TLSPrivateKeyKey])

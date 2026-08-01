@@ -1,152 +1,142 @@
 # supek8smcp
 
-`supek8smcp` 是一个 Kubernetes Operator：每个命名空间中的
-`KubernetesMCPServer` 自定义资源（CR）对应一个单副本、HTTPS
-Streamable HTTP MCP Server。MCP 客户端用 Kubernetes Bearer Token 连接；
-服务端先用 TokenReview 校验令牌，再用同一个令牌调用 kube-apiserver。
-因此，MCP 请求永远不会比该令牌在 Kubernetes RBAC 中已有的权限更多。
+<p align="center"><img src="docs/assets/supek8smcp-logo.png" alt="supek8smcp" width="220"></p>
 
-项目模块为 `github.com/samuelsupe/supek8smcp`，CRD 为
-`mcp.supek8smcp.io/v1alpha1/KubernetesMCPServer`（简称 `kmcp`）。
+<p align="center"><strong>A caller-preserving Kubernetes MCP gateway.</strong><br>
+Turn a namespaced custom resource into a single-replica, HTTPS Streamable HTTP MCP endpoint while every Kubernetes request keeps the caller's own identity and RBAC.</p>
 
-## 能力概览
+[English](README.md) | [简体中文](README.zh-CN.md)
 
-- **ReadOnly**：只读工具 `k8s.search`、`k8s.describe`、`k8s.read`；Pod 日志
-  仅允许一次性读取（`follow=false`）。
-- **SafeWrite**：包含上述只读能力和 `k8s.plan`、`k8s.commit`；Pod 日志仍只允许
-  `follow=false`，所有持久写操作必须先生成计划，计划两分钟后过期且只能提交一次。
-- **Dangerous**：包含 SafeWrite 能力，并允许受 `streamTimeout`/
-  `maxOutputBytes` 限制的持续 Pod 日志（`follow=true`），以及受 `execTimeout`/
-  `maxOutputBytes` 限制的有界、非交互 `exec/attach`。不提供 TTY。
-- 资源范围由 CR 的 `scope` 与 `policy` 先做能力上限，再与请求 Bearer
-  Token 的 Kubernetes RBAC 求交集。
-- `policy.rules.verbs` 支持 Kubernetes 动词，也支持 `k8s.search` 返回的逻辑
-  action（如 `logs`、`scale`、`restart`、`apply`、`exec`、`attach`）。
-- Secret 默认脱敏（`policy.sensitiveReads: Redact`）；也可选择
-  `Deny` 或显式 `Allow`。
-- Operator 默认自管 CA 和叶子证书，也可通过 `spec.tls.secretName` 使用
-  现有 `kubernetes.io/tls` Secret（需提供 `tls.crt`、`tls.key`、`ca.crt`，并通过
-  Operator 的密钥、信任链、有效期、ServerAuth 和 Service SAN 校验）。服务仅创建
-  `ClusterIP` Service。
+[![CI](https://github.com/samuelsupe/supek8smcp/actions/workflows/ci.yml/badge.svg)](https://github.com/samuelsupe/supek8smcp/actions/workflows/ci.yml)
+[![Release](https://github.com/samuelsupe/supek8smcp/actions/workflows/release.yml/badge.svg)](https://github.com/samuelsupe/supek8smcp/actions/workflows/release.yml)
+[![GHCR](https://img.shields.io/badge/GHCR-container-2496ED?logo=docker&logoColor=white)](https://github.com/samuelsupe/supek8smcp/pkgs/container/supek8smcp)
+[![Go](https://img.shields.io/badge/go-1.25-00ADD8?logo=go&logoColor=white)](go.mod)
 
-详细的安装步骤、安全边界和故障排查见：
+`supek8smcp` watches `mcp.supek8smcp.io/v1alpha1/KubernetesMCPServer` resources (also called `kmcp`). Each resource creates one HTTPS MCP Server, a `ClusterIP` Service, TLS material, and the minimum TokenReview binding needed by that Server. The Server validates the client's Kubernetes Bearer token, then uses the same token for the Kubernetes API: the endpoint cannot grant more Kubernetes access than the caller already has.
 
-- [部署指南](docs/deployment.md)
-- [安全模型](docs/security.md)
+## What it provides
 
-## 快速开始
+- A progressively disclosed MCP surface: start with `k8s.help`, search for a signed capability, inspect or read only the selected resource, and use the explicit plan/commit boundary for writes.
+- Three modes with conservative defaults and independent scope, policy, timeout, byte, list, concurrency, and per-identity rate budgets.
+- Secret redaction by default, bounded schema expansion, bounded logs and exec/attach, structured security audit events, Prometheus metrics, and optional alerts.
+- Operator-managed shared CA and automatic serving-leaf rotation, or a validated same-namespace `kubernetes.io/tls` Secret.
 
-### 1. 安装 Operator 和 CRD
+## Modes at a glance
 
-准备可被集群拉取的镜像后，在仓库根目录执行：
+| Mode | Available tools | Guardrails |
+| --- | --- | --- |
+| `ReadOnly` | `k8s.help`, `k8s.search`, `k8s.describe`, `k8s.read` | Reads only; pod logs require one-shot `follow=false`; no writes, exec, or attach. |
+| `SafeWrite` | Read-only tools plus `k8s.plan`, `k8s.commit` | Every persistent write is planned, expires after two minutes, and can be committed once; logs remain one-shot. |
+| `Dangerous` | SafeWrite plus streaming logs and bounded non-interactive `exec`/`attach` | `streamTimeout`, `execTimeout`, byte, list, and concurrency limits still apply; no TTY. |
+
+CR `scope` and `policy` define an upper bound. The request Bearer token's Kubernetes RBAC is always checked as a second, independent boundary; effective permission is the intersection.
+
+## Progressive MCP workflow
+
+```mermaid
+sequenceDiagram
+    participant C as MCP client
+    participant S as supek8smcp Server
+    participant K as kube-apiserver
+    C->>S: k8s.help (compact index)
+    S-->>C: mode-aware tools and detailsRequest
+    C->>S: k8s.search (query + optional name)
+    S->>K: TokenReview, then SSAR/resource discovery
+    S-->>C: signed capability IDs
+    C->>S: k8s.describe / k8s.read
+    S->>K: same caller token, bounded request
+    S-->>C: bounded result + audit event
+    C->>S: k8s.plan -> k8s.commit (SafeWrite/Dangerous)
+    S->>K: dry-run, then one authorized write
+```
+
+`k8s.help` is local static data, but requests still pass authentication, rate limiting, and audit. `k8s.describe` locates an exact `fieldPath` before expanding `$ref` schemas and caps one expansion at 10,000 nodes. List calls page at most eight upstream objects and preserve Kubernetes `continue` tokens. Non-watch delegated, discovery, and OpenAPI responses are capped at 8 MiB.
+
+## Architecture
+
+```mermaid
+flowchart LR
+    C[MCP client<br/>HTTPS + Bearer token] -->|ClusterIP :8443/mcp| S[Server Pod<br/>single replica]
+    O[Operator<br/>watches KubernetesMCPServer] -->|Deployment, Service, TLS, RBAC| S
+    S -->|TokenReview using Server SA| K[(kube-apiserver)]
+    S -->|same caller token| K
+    S -->|audit_schema=v1| L[Logs / Kubernetes audit]
+    S -->|:9090| M[Prometheus / alerts]
+```
+
+## Secure quickstart
+
+Create a dedicated endpoint namespace first. Anyone who can create a Pod there may be able to mount TLS material or the Server ServiceAccount, so do not share this namespace with ordinary tenants or grant them Pod/Deployment creation.
 
 ```bash
 make install
-make deploy IMG=registry.example.com/platform/supek8smcp:0.1.0
+make deploy IMG=ghcr.io/your-org/supek8smcp:0.1.0
+kubectl create namespace supek8smcp-servers
 ```
 
-`make install` 安装 CRD；`make deploy` 创建 Operator 的命名空间、RBAC 和
-Deployment，并将 `IMG` 同时用于 Operator 与每个 CR 的 Server 镜像。生产环境
-应使用不可变镜像标签或 digest，并在变更前阅读
-[部署指南](docs/deployment.md)。
-
-### 2. 创建一个只读 MCP Server
+Apply a least-privilege, read-only endpoint (the full example is in [`docs/deployment.md`](docs/deployment.md)):
 
 ```yaml
 apiVersion: mcp.supek8smcp.io/v1alpha1
 kind: KubernetesMCPServer
 metadata:
   name: team-readonly
-  namespace: platform
+  namespace: supek8smcp-servers
 spec:
   mode: ReadOnly
   scope:
-    namespaces:
-      - platform
+    namespaces: [platform]
     allowClusterScopedRead: false
   policy:
     sensitiveReads: Redact
   tls: {}
+  networkPolicy:
+    enabled: true
+    allowedNamespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: platform
 ```
-
-保存为 `kubernetesmcpserver.yaml` 后应用：
 
 ```bash
 kubectl apply -f kubernetesmcpserver.yaml
-kubectl -n platform get kmcp team-readonly -o yaml
-kubectl -n platform get svc -l app.kubernetes.io/instance=team-readonly
+kubectl -n supek8smcp-servers get kmcp team-readonly -o wide
+kubectl -n supek8smcp-servers get svc -l app.kubernetes.io/instance=team-readonly
 ```
 
-CRD 会在接纳时为 `mode`、`policy.sensitiveReads`、limits 和
-`networkPolicy.enabled` 应用安全默认值；Operator 还会在生成 Server 配置时将
-`scope.namespaces` 默认设为 CR 所在命名空间。默认值分别为：`ReadOnly`、
-`Redact`、NetworkPolicy 启用；请求/流/exec 超时为 `30s`/`60s`/`30s`，
-输入/输出/列表/并发上限为 `262144`/`1048576`/`100`/`4`。排障时以 Server
-Pod 挂载的 `<name>-config` ConfigMap 和状态条件为准。
+Use `status.endpoint` and the CA from `status.caConfigMapName`; send a short-lived ServiceAccount token as `Authorization: Bearer ...`. Keep TLS verification enabled, never put a token in a URL, and expose the `ClusterIP` only through a controlled TLS-aware gateway when an external client is required.
 
-### 3. 取 CA 和 Bearer Token
+## Install and configure
 
-Operator 自管证书时，CA 位于 CR 状态中的 `status.caConfigMapName` 指向的
-ConfigMap。复制 CA 到本地（示例使用 `ca.crt` 键）：
+Build and publish an immutable image, then install the CRD and Operator:
 
 ```bash
-CA_CONFIGMAP="$(kubectl -n platform get kmcp team-readonly \
-  -o jsonpath='{.status.caConfigMapName}')"
-kubectl -n platform get configmap "$CA_CONFIGMAP" \
-  -o jsonpath='{.data.ca\.crt}' > ca.crt
+export IMG=registry.example.com/platform/supek8smcp:0.1.0
+make docker-build IMG="$IMG"
+docker push "$IMG"
+make install
+make deploy IMG="$IMG"
 ```
 
-给 MCP 客户端使用的身份应是一个单独的 ServiceAccount，并通过 Kubernetes
-RBAC 精确授予所需资源和动词。短期调试可以：
+`spec.mode`, `spec.scope`, `spec.policy`, `spec.limits`, `spec.tls`, and `spec.networkPolicy` are the operator-facing contract. Review the generated `<name>-config` ConfigMap and `status.conditions` (`Ready`, `TLSReady`, and `AuthReady`) after every change. See [`docs/deployment.md`](docs/deployment.md) for TLS choices, RBAC, upgrades, monitoring, and troubleshooting.
+
+## Observability and security
+
+The Server writes `audit_schema=v1` JSON events without tokens, plans, resource bodies, patches, commands, stdin, logs, or responses. Metrics are available on `:9090/metrics`, including authentication attempts, rate-limit rejections, audit events, tool results, and tool duration. Optional Prometheus resources live under [`config/monitoring`](config/monitoring).
+
+Read the [security model](docs/security.md) before enabling `SafeWrite` or `Dangerous`. It documents namespace trust, TokenReview/RBAC, Origin rejection, self-protection of operator-managed resources, SafeWrite payload checks, plan budgets, TLS rotation, NetworkPolicy, and incident handling.
+
+## Development and release
 
 ```bash
-TOKEN="$(kubectl -n platform create token mcp-client --duration=1h)"
+make fmt
+make vet
+make test
+make build
+make docker-build IMG=ghcr.io/your-org/supek8smcp:0.1.0
 ```
 
-Token 只放在客户端的进程环境或 Secret 管理器中；不要提交到 Git 或写入
-日志。客户端每次请求都发送：
+Use `make manifests` when API types change; review generated YAML rather than editing it by hand. Release images should use immutable tags or digests and be published through the repository's release automation. See [`CHANGELOG.md`](CHANGELOG.md), [`CONTRIBUTING.md`](CONTRIBUTING.md), and [`SECURITY.md`](SECURITY.md) before opening a change or reporting a vulnerability.
 
-```http
-Authorization: Bearer <token>
-```
+## Deliberate boundaries
 
-服务端会对该令牌执行 TokenReview，并用同一令牌访问 kube-apiserver。
-
-### 4. 配置 Streamable HTTP MCP 客户端
-
-使用 `status.endpoint` 作为服务地址；集群内通常是
-`https://<service>.<namespace>.svc:8443/mcp`，实际值以 CR 状态为准。客户端
-需要信任 `ca.crt`，并发送上一步的 Bearer Token。一个通用的配置形状如下
-（不同 MCP 客户端的字段名可能不同）：
-
-```json
-{
-  "mcpServers": {
-    "team-readonly": {
-      "type": "streamable-http",
-      "url": "https://team-readonly.platform.svc:8443/mcp",
-      "headers": {
-        "Authorization": "Bearer ${K8S_MCP_TOKEN}"
-      },
-      "tls": {
-        "caFile": "/path/to/ca.crt"
-      }
-    }
-  }
-}
-```
-
-不要以 `curl -k`、跳过证书验证或把 token 拼进 URL 的方式连接。若客户端
-运行在集群外，应通过受控的 TLS 入口暴露服务，并保持端到端的 CA/证书校验；
-Service 本身仍然是 `ClusterIP`。
-
-## 版本和限制
-
-第一版明确不支持：OAuth、port-forward、`cp`、proxy、evict、drain、多集群、
-Server 多副本和 TTY。`exec/attach` 与持续 Pod 日志（`k8s.read` 的
-`follow=true`）只在 Dangerous 模式可用，且必须满足请求/流/exec 超时、输入输出
-大小和并发上限；一次性日志（`follow=false`）仍是各模式的只读能力。SafeWrite/
-Dangerous 的持久写不能绕过 `k8s.plan` -> 两分钟一次性计划 -> `k8s.commit` 流程。
-
-升级或排障前请先阅读 [安全模型](docs/security.md) 和
-[部署指南](docs/deployment.md) 的限制、证书轮换及故障排查章节。
+The first release does not provide OAuth, port-forward, `cp`, proxy, evict, drain, TTY, multi-cluster routing, JSON-RPC batch, or multi-replica Server deployments. `Dangerous` is not an administrator shell: exec/attach is non-interactive and bounded. A dedicated endpoint namespace, TLS verification, short-lived caller tokens, and least-privilege Kubernetes RBAC remain deployment requirements even when the CR policy is permissive.

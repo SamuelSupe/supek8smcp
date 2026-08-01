@@ -2,6 +2,8 @@ package server
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"slices"
 
@@ -112,10 +114,60 @@ func (p *Policy) Authorize(ctx context.Context, principal *Principal, action Act
 }
 
 func (p *Policy) CheckAndAuthorize(ctx context.Context, principal *Principal, action Action, namespace, name string) error {
-	if err := p.Check(action, namespace); err != nil {
+	if err := p.CheckTarget(action, namespace, name); err != nil {
 		return err
 	}
 	return p.Authorize(ctx, principal, action, namespace, name)
+}
+
+func (p *Policy) CheckTarget(action Action, namespace, name string) error {
+	if err := p.Check(action, namespace); err != nil {
+		return err
+	}
+	if action.Mutating() && name != "" && p.managedTarget(action, namespace, name) {
+		return policyError("managed_resource_denied", "an MCP server may not mutate its own operator-managed control-plane resources")
+	}
+	return nil
+}
+
+func (p *Policy) managedTarget(action Action, namespace, name string) bool {
+	if !action.Namespaced {
+		switch action.GVR.Group + "/" + action.GVR.Resource {
+		case "rbac.authorization.k8s.io/clusterrolebindings":
+			return name == managedClusterBindingName(p.config.Namespace, p.config.Name)
+		case "rbac.authorization.k8s.io/clusterroles":
+			return name == "supek8smcp-tokenreviewer"
+		}
+		return false
+	}
+	if action.GVR.Group == "mcp.supek8smcp.io" && action.GVR.Resource == "kubernetesmcpservers" {
+		return true
+	}
+	if action.GVR.Group == "" && action.GVR.Resource == "secrets" && name == "supek8smcp-serving-ca" {
+		return true
+	}
+	if namespace != p.config.Namespace {
+		return false
+	}
+	switch action.GVR.Group + "/" + action.GVR.Resource {
+	case "/configmaps":
+		return name == p.config.Name+"-config" || name == p.config.Name+"-ca"
+	case "/secrets":
+		tlsName := p.config.Spec.TLS.SecretName
+		if tlsName == "" {
+			tlsName = p.config.Name + "-tls"
+		}
+		return name == tlsName || name == "supek8smcp-serving-ca"
+	case "/services", "/serviceaccounts", "apps/deployments", "networking.k8s.io/networkpolicies":
+		return name == p.config.Name
+	default:
+		return false
+	}
+}
+
+func managedClusterBindingName(namespace, name string) string {
+	sum := sha256.Sum256([]byte(namespace + "/" + name))
+	return "supek8smcp-" + hex.EncodeToString(sum[:8])
 }
 
 func matchesAnyRule(rules []mcpv1alpha1.CapabilityRule, action Action) bool {

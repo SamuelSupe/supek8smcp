@@ -52,6 +52,12 @@ func TestLoadAppliesRuntimeDefaults(t *testing.T) {
 	if got, want := cfg.Spec.Limits.MaxConcurrent, int32(4); got != want {
 		t.Fatalf("default max concurrent = %d, want %d", got, want)
 	}
+	if got, want := cfg.Spec.Limits.RequestsPerMinute, int32(120); got != want {
+		t.Fatalf("default requests per minute = %d, want %d", got, want)
+	}
+	if got, want := cfg.Spec.Limits.Burst, int32(20); got != want {
+		t.Fatalf("default burst = %d, want %d", got, want)
+	}
 }
 
 func TestLoadRejectsInvalidModeAndLimits(t *testing.T) {
@@ -76,6 +82,26 @@ func TestLoadRejectsInvalidModeAndLimits(t *testing.T) {
 			name:    "negative timeout",
 			content: `{"name":"demo","namespace":"mcp-system","spec":{"limits":{"requestTimeout":"-1s"}}}`,
 			wantErr: "timeouts must be positive",
+		},
+		{
+			name:    "requests per minute below minimum",
+			content: `{"name":"demo","namespace":"mcp-system","spec":{"limits":{"requestsPerMinute":-1}}}`,
+			wantErr: "requestsPerMinute must be between",
+		},
+		{
+			name:    "requests per minute above maximum",
+			content: `{"name":"demo","namespace":"mcp-system","spec":{"limits":{"requestsPerMinute":6001}}}`,
+			wantErr: "requestsPerMinute must be between",
+		},
+		{
+			name:    "burst below minimum",
+			content: `{"name":"demo","namespace":"mcp-system","spec":{"limits":{"burst":-1}}}`,
+			wantErr: "burst must be between",
+		},
+		{
+			name:    "burst above maximum",
+			content: `{"name":"demo","namespace":"mcp-system","spec":{"limits":{"burst":1001}}}`,
+			wantErr: "burst must be between",
 		},
 	}
 

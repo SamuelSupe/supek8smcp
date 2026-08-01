@@ -1,160 +1,114 @@
-# 安全模型与边界
+# Security model and boundaries
 
-`supek8smcp` 将“客户端能调用什么”限制为三层交集：CR 配置的能力上限、
-请求 Bearer Token 的 Kubernetes RBAC，以及运行时资源/网络/时间预算。任何
-一层拒绝都应拒绝请求；MCP Server 不会把自己的 ServiceAccount 或 Operator
-权限借给客户端。
+`supek8smcp` limits what a client can call through the intersection of three controls: the CR's capability ceiling, the request Bearer token's Kubernetes RBAC, and runtime resource/network/time budgets. A denial at any layer denies the request. The MCP Server never lends its own ServiceAccount or Operator privileges to a client.
 
-## 信任边界
+## Trust boundaries
 
-请求链路如下：
+The request path is:
 
-1. MCP 客户端通过 HTTPS Streamable HTTP 发送 `Authorization: Bearer <token>`。
-2. Server 使用 Kubernetes TokenReview API 验证 token、用户和群组。
-3. Server 使用同一个 token 创建 kube-apiserver 客户端，并执行请求。
-4. Server 将 CR 的 `scope`/`policy` 与 Kubernetes RBAC 求交集，再应用模式、
-   脱敏和资源限制。
+1. The MCP client sends `Authorization: Bearer <token>` over HTTPS Streamable HTTP.
+2. The Server validates the token, user, and groups with Kubernetes TokenReview.
+3. The Server creates a kube-apiserver client with that same token and performs the request.
+4. The Server intersects CR `scope`/`policy` with Kubernetes RBAC, then applies mode, redaction, and resource limits.
 
-在这条认证授权链路中，Operator 只负责为每个 CR 创建 Server ServiceAccount 与固定的
-`supek8smcp-tokenreviewer` ClusterRoleBinding；它的 RBAC 仅允许对该固定
-ClusterRole 执行 `bind`，不授予 Operator `tokenreviews.create`，也不让 Operator
-代持客户端 Bearer Token。实际 TokenReview 由 Server ServiceAccount 发起，后续
-资源请求仍使用客户端原始 token。
+The Kubernetes namespace is a hard trust boundary. A principal that can create a Pod in the Server namespace can usually mount that namespace's TLS Secret or Server ServiceAccount and can forge Service selector labels; Secret `get` permissions or NetworkPolicy alone cannot prevent this indirect access. Put each `KubernetesMCPServer` in a dedicated, restricted endpoint namespace, do not grant ordinary workload identities Pod/Deployment creation there, use `scope.namespaces` for workload namespaces, and allow only explicit MCP clients or gateways through NetworkPolicy. Operator managed labels and MCP self-protection do not replace namespace isolation.
 
-为避免浏览器跨站凭据滥用，Server 拒绝带 `Origin` header 的请求；集成应使用
-受控的非浏览器 MCP 客户端或在受信任的后端代理中移除该 header（代理仍必须
-保留 TLS、认证和审计边界）。
+In this authentication path the Operator only creates a Server ServiceAccount and a binding to the fixed `supek8smcp-tokenreviewer` ClusterRole. Its RBAC permits reading and binding that role, not `tokenreviews.create`; it never holds a client Bearer token. Before binding, the Operator verifies that the role contains only `authentication.k8s.io/tokenreviews.create` and is not aggregated. Missing, unverifiable, expanded, or conflicting bindings are removed and `AuthReady=False` is reported. The Server ServiceAccount performs TokenReview; subsequent resource calls still use the original client token.
 
-因此，CR 中的规则是“最多允许什么”，不是额外授权；TokenReview 成功也不
-代表 token 能访问所有资源。应为每个 MCP 集成建立独立 ServiceAccount、短期
-token 和最小 Role/ClusterRole。
+Controller ownership is a safety boundary for same-name resources. The Operator never adopts, deletes, or scales a same-name ServiceAccount, Service, ConfigMap, Deployment, NetworkPolicy, or managed TLS Secret unless its controller ownerReference points to the current CR. It creates the TokenReview binding only after that owned Server ServiceAccount is present; an ownership conflict fails closed instead of changing the unrelated object.
 
-## 模式与工具
+To prevent browser cross-site credential abuse, the Server rejects requests with an `Origin` header. Use a controlled non-browser MCP client, or a trusted backend proxy that removes the header while retaining TLS, authentication, and audit boundaries.
 
-| 模式 | 工具 | 主要边界 |
+CR rules therefore describe “at most what is allowed”, not an additional grant. Successful TokenReview does not mean that a token can read every resource. Give every MCP integration its own ServiceAccount, short-lived token, and least-privilege Role/ClusterRole.
+
+## Modes and tools
+
+| Mode | Tools | Main boundary |
 | --- | --- | --- |
-| `ReadOnly` | `k8s.search`、`k8s.describe`、`k8s.read` | 仅读取；Pod 日志只允许一次性 `follow=false`，不能持久写或 exec/attach |
-| `SafeWrite` | 上述只读工具 + `k8s.plan`、`k8s.commit` | Pod 日志仍只允许 `follow=false`；所有持久写必须先 plan，再在两分钟内一次性 commit |
-| `Dangerous` | SafeWrite 全部工具 + `follow=true` 持续日志、有界非交互 exec/attach | 日志流受 `streamTimeout`/`maxOutputBytes`，exec/attach 受 `execTimeout`/`maxOutputBytes` 等限制；不提供 TTY |
+| `ReadOnly` | `k8s.help`, `k8s.search`, `k8s.describe`, `k8s.read` | The handbook is static; resources are read-only, Pod logs require one-shot `follow=false`, and persistent writes/exec/attach are unavailable. |
+| `SafeWrite` | Read-only tools plus `k8s.plan`, `k8s.commit` | Logs remain `follow=false`; every persistent write requires plan, then one commit within two minutes. |
+| `Dangerous` | All SafeWrite tools plus `follow=true` logs and bounded non-interactive exec/attach | Streams use `streamTimeout`/`maxOutputBytes`; exec/attach use `execTimeout`/`maxOutputBytes` and other limits; no TTY. |
 
-`k8s.plan` 生成待执行的写计划；计划有效期为两分钟且只能成功提交一次。
-`k8s.commit` 必须带同一计划和同一授权身份。过期、重复、身份不匹配或内容
-改变时拒绝提交并要求重新 plan。客户端不应缓存或重放计划。
+`k8s.help` is exposed in all modes. With no arguments it returns only a tool index and mode-specific `available` state; a second call using the index's `detailsRequest` loads one tool's full usage. ReadOnly can inspect write-tool documentation, but `k8s.plan`/`k8s.commit` are marked unavailable and are not exposed by that Server. The handbook is local static data and does not run discovery, reads, or writes, but the request still requires TokenReview, identity rate limiting, and `audit_schema=v1` auditing.
 
-`k8s.read` 的 Pod 日志读取在所有模式都支持 `follow=false` 的一次性结果；
-`follow=true` 会建立持续日志流，仅 Dangerous 模式允许，并受 `streamTimeout`
-和 `maxOutputBytes` 限制。
+`k8s.plan` creates a pending write plan. It is valid for two minutes and succeeds once only. `k8s.commit` must present the same plan and authorized identity. Expired, replayed, identity-mismatched, or changed content is rejected and requires a new plan. In-memory pending plans are bounded by 1,024 entries and 64 MiB globally, usually 16 MiB per identity; one oversized plan may be retained. Clients must not cache or replay plans or accumulate uncommitted plans.
 
-第一版不提供 OAuth、port-forward、`cp`、proxy、evict、drain、TTY、多集群或
-Server 多副本。不要把 `Dangerous` 当作管理员 shell：exec/attach 必须是有界、
-非交互请求，并服从 `execTimeout`、输入输出大小和并发上限。
+When a Kubernetes Role uses `resourceNames`, `k8s.search` must receive the target `name`. The Server includes that name in SelfSubjectAccessReview so named permissions are not misclassified. Each page performs at most 100 SelfSubjectAccessReviews; sparse authorization can yield fewer results than requested, so clients must continue with `nextCursor` instead of amplifying one tool call against kube-apiserver.
 
-## CR 能力上限
+`k8s.read` supports one-shot Pod logs (`follow=false`) in every mode. `follow=true` opens a continuous stream only in Dangerous and is bounded by `streamTimeout`, `maxListItems` (log lines), and `maxOutputBytes`.
+
+The first release does not provide OAuth, port-forward, `cp`, proxy, evict, drain, TTY, multi-cluster routing, or multi-replica Servers, and it does not accept JSON-RPC batches. Each MCP HTTP request performs at most one call, preventing legacy batches from bypassing identity rate and global concurrency budgets. Dangerous is not an administrator shell: exec/attach is bounded, non-interactive, and subject to input/output, timeout, and concurrency limits.
+
+## CR capability ceiling
 
 ### Scope
 
-`spec.scope.namespaces` 限定 namespaced 资源；CRD 不做命名空间相关默认，Operator
-在运行配置中将省略值设为 CR 所在命名空间。
-`allowClusterScopedRead` 控制是否可读集群级资源；集群级写入还要求
-`allowClusterScopedWrite: true` 且模式为 `Dangerous`。scope 不会替代 RBAC，
-也不会把 namespaced token 变成 cluster-admin。
+`spec.scope.namespaces` limits namespaced resources. The CRD does not apply a namespace default; the Operator sets an omitted value to the CR's namespace in the runtime configuration. `allowClusterScopedRead` controls cluster-scoped reads. Cluster-scoped writes additionally require `allowClusterScopedWrite: true` and `Dangerous` mode. Scope does not replace RBAC or turn a namespaced token into cluster-admin.
+
+Admission also requires `metadata.name` to be at most 63 characters and to match a lowercase DNS Service label: it starts with a letter, ends with a letter or digit, and contains only lowercase letters, digits, and hyphens.
 
 ### Policy
 
-`spec.policy.rules` 按 API group、resource 和 verb 描述上限。`verbs` 可填写
-Kubernetes 原生动词，也可填写 `k8s.search` 返回的逻辑 action（例如 `logs`、
-`scale`、`restart`、`apply`、`exec`、`attach`）。留空使用当前模式的保守默认
-能力。规则只会收窄可调用集合；最终调用仍由 token 的 Kubernetes 授权决定。
-修改 CR 的 mode/scope/policy 应视为权限变更，纳入代码审查、审计和发布审批。
+`spec.policy.rules` describes an upper bound by API group, resource, and verb. `verbs` may contain Kubernetes verbs or logical actions from `k8s.search`, including `logs`, `scale`, `restart`, `apply`, `exec`, and `attach`. An empty rule set selects conservative mode defaults. Rules only narrow the callable set; the token's Kubernetes authorization is still required. Treat mode/scope/policy changes as permission changes requiring review, audit, and release approval.
 
-### Secret 读取
+The Server rejects MCP attempts to modify its own CR, runtime configuration/CA ConfigMap, TLS Secret, Deployment, Service, ServiceAccount, NetworkPolicy, fixed TokenReview role, or binding. It also rejects any other resource carrying `app.kubernetes.io/managed-by=supek8smcp-operator`; this self-protection cannot be relaxed by CR policy or client RBAC.
 
-`spec.policy.sensitiveReads` 的默认值是 `Redact`：Secret 元数据可按其他规则
-读取，但数据字段脱敏。`Deny` 完全拒绝敏感读取；`Allow` 只应在明确的受控
-场景使用，并同时收紧 RBAC、网络和审计范围。不要把 Secret 值、Bearer Token、
-TLS 私钥或 exec 输出写入日志、MCP 客户端配置或 issue。
+SafeWrite checks both the submitted content and the kube-apiserver dry-run result. It rejects direct root/root-group, privileged, cluster-critical PriorityClass, Windows GMSA/ContainerAdministrator, or Unconfined Seccomp/AppArmor settings. `null`, parent/container-list replacement, and omitted fields cannot remove existing non-root, `allowPrivilegeEscalation=false`, read-only root filesystem, capability-drop, security-profile, ServiceAccount, or runtime-class constraints. These checks block known unsafe values and constraint weakening; they do not automatically add Restricted Pod Security settings to new workloads. Enable Pod Security Admission or an equivalent cluster admission policy.
 
-## 认证、授权与审计
+### Secret reads
 
-- 使用 HTTPS；客户端必须校验 CA 和服务端名称。默认 Operator 自管 CA/叶子
-  证书，CA 名称通过 `status.caConfigMapName` 发布；也可引用
-  `kubernetes.io/tls` Secret。
-- Token 只放在 `Authorization` header。代理、日志采集器和 tracing exporter
-  必须显式排除该 header；禁止 query 参数传 token。
-- TokenReview 和后续 kube-apiserver 请求使用同一 token，确保 Kubernetes 审计
-  能看到真实主体。不要让 Server 用 Operator 的高权限身份代替客户端调用。
-- 为不同团队/自动化任务使用不同 ServiceAccount，设置短过期时间并定期轮换；
-  删除或禁用身份后，TokenReview/RBAC 应立即阻止后续请求。
-- 监控 CR 状态、Operator/Server 日志、Kubernetes 审计和 NetworkPolicy 事件。
-  日志只保留必要的主体、请求类别、结果和延迟，不保留凭据或完整资源内容。
+The default `spec.policy.sensitiveReads` value is `Redact`: Secret data and all annotation values are redacted, preventing annotations such as `kubectl.kubernetes.io/last-applied-configuration` from copying `stringData`. Names, namespaces, labels, type, and other metadata remain readable when policy permits. `Deny` rejects sensitive reads completely. Use `Allow` only for an explicitly controlled case with tighter RBAC, network, and audit scope. Never put Secret values, Bearer tokens, TLS private keys, or exec output in logs, client configuration, or issues.
 
-## 资源和网络防护
+## Authentication, authorization, and audit
 
-CR 的 `limits` 将请求、流、exec 超时，输入/输出字节数、列表条目数和并发数
-设为显式预算；超限请求应失败而不是无限等待或无限制返回。CRD 会为这些字段
-应用默认值，Operator 生成的 Server 配置也会保留这些值；部署后应检查
-`<name>-config` ConfigMap 中的实际值。对高风险场景，进一步降低 `maxOutputBytes`、
-`maxListItems` 和 `maxConcurrent`。
+- Use HTTPS and verify both the CA and server name. Operator-managed CA/leaf certificates are published through `status.caConfigMapName`; a `kubernetes.io/tls` Secret may be referenced instead.
+- Put tokens only in the `Authorization` header. Proxies, log collectors, and tracing exporters must explicitly exclude that header; query-string tokens are forbidden.
+- TokenReview and subsequent kube-apiserver calls use the same token, so Kubernetes audit sees the real subject. The Server must not substitute a high-privilege Operator identity.
+- The Server emits structured `audit_schema=v1` JSON for authentication and every MCP tool call that passes parameter validation. It contains stable Kubernetes user/UID identifiers, tool, API target, decision, stable reason, and latency; it never contains Bearer tokens, plan IDs, objects, patches, exec commands, stdin, log content, or tool responses.
+- Use different ServiceAccounts for teams and automation, set short expirations, and rotate regularly. Removing or disabling an identity should immediately block later requests through TokenReview/RBAC.
+- Monitor CR status, Operator/Server logs, Kubernetes audit, and NetworkPolicy events. Keep only necessary subject, request class, result, and latency; do not retain credentials or complete resource contents.
 
-CRD 还限制字节/列表/并发字段的范围：`maxInputBytes` 为 1 KiB–10 MiB，
-`maxOutputBytes` 为 1 KiB–50 MiB，`maxListItems` 为 1–1000，`maxConcurrent`
-为 1–32；时间字段使用 Kubernetes duration 字符串。超过范围的 CR 会在 API
-接纳阶段被拒绝。
+## Resource and network protection
 
-`networkPolicy.enabled` 默认启用。当前生成的是仅限入站（Ingress）的策略，端口
-为 MCP `8443` 和 metrics/health `9090`；未设置 selector 时默认允许同命名空间
-Pod，`allowedNamespaceSelector` 与 `allowedPodSelector` 可进一步收窄来源（两者
-同时设置时取交集）。策略不声明 Egress，Server 到 kube-apiserver、DNS 和
-TokenReview 的出站连通性依赖集群的其他网络策略。若通过入口/网关暴露到集群外，
-入口必须保持 TLS、限制来源、隐藏 `Authorization`，并避免将 Server 扩展为公网
-匿名端点。
+CR `limits` make request/stream/exec timeouts, input/output bytes, list items, concurrency, and per-identity `requestsPerMinute`/`burst` explicit budgets. Exceeding a budget fails the request instead of waiting forever or returning unbounded data. Identity rate limiting is isolated by a stable digest of username and UID after TokenReview; token rotation or TokenReview extras do not create a new bucket. Denials return HTTP `429` and `Retry-After`. This does not replace global `maxConcurrent` or Kubernetes RBAC. CRD defaults and generated Server configuration preserve these values; inspect `<name>-config` after deployment. For high-risk environments, lower `maxOutputBytes`, `maxListItems`, `maxConcurrent`, `requestsPerMinute`, and `burst`.
 
-Service 固定为 `ClusterIP`，每个 CR 只有一个 Server 副本。不要通过手工修改
-Deployment 将副本数扩展为多副本，也不要把同一外部身份无边界地共享给多个团队。
+Kubernetes resource lists further cap each upstream page at eight objects and preserve the Kubernetes `continue` token; callers should use `cursor` for progressive reads. The delegated dynamic client rejects non-watch resource, discovery, or OpenAPI responses over 8 MiB before output truncation can exhaust Server memory. Watches remain bounded by `streamTimeout`, `maxListItems`, and `maxOutputBytes`.
 
-## TLS 和密钥处理
+`k8s.describe` locates `fieldPath` before expanding references and caps one schema expansion at 10,000 nodes. A budget response includes a `truncated` marker. Start with shallow `depth` and an exact `fieldPath` rather than expanding a large CRD schema wholesale.
 
-Operator 自管证书时，叶子私钥只应存在于受限 Secret 并挂载到 Server；客户端
-只获取 CA。使用 `spec.tls.secretName` 时，Secret 必须是同命名空间的
-`kubernetes.io/tls`；Operator 会校验密钥匹配、`ca.crt` 信任链、有效期、
-ServerAuth 用途和 `<name>.<namespace>.svc` SAN，任何一项不满足都会使
-`TLSReady=False`。轮换由外部证书流程负责。
-轮换期间应确认 Server 重新加载新 Secret，并让客户端刷新 CA/连接池。
+The CRD bounds byte/list/concurrency fields: `maxInputBytes` 1 KiB–10 MiB, `maxOutputBytes` 1 KiB–50 MiB, `maxListItems` 1–1000, `maxConcurrent` 1–32, `requestsPerMinute` 1–6000, and `burst` 1–1000. Duration fields must parse as Kubernetes durations and be greater than zero. Invalid durations or out-of-range CRs are rejected at API admission. Rate-limit state is in one Server Pod's memory; the first release is single-replica, so there is no cross-replica budget skew.
 
-Operator 命名空间的 `supek8smcp-serving-ca` 是所有自管叶子的共享根 CA，包含
-`ca.crt` 和 `ca.key`，没有随单个 CR 自动删除的 owner reference。应限制其读取、
-纳入备份和密钥轮换流程；删除它会重新生成根，现有仍有效的叶子暂时继续使用原
-CA，但后续轮换会切换到新链，要求客户端重新获取各 CR 的 CA ConfigMap。自管根 CA
-有效期约 5 年，叶子约 90 天，剩余不足
-30 天时由 Operator 重签；轮换期间要验证客户端能重新建立 TLS 连接。
+`networkPolicy.enabled` defaults to true. The generated policy is ingress-only for MCP `8443` and metrics/health `9090`; without selectors it allows same-namespace Pods. `allowedNamespaceSelector` and `allowedPodSelector` narrow sources, and both are intersected when set. The policy declares no Egress, so Server access to kube-apiserver, DNS, and TokenReview depends on other cluster policies. A gateway exposing the endpoint externally must retain TLS, restrict sources, hide `Authorization`, and must not turn the Server into an anonymous public endpoint.
 
-如果必须导出诊断包，先脱敏 YAML、Secret、token、headers、资源数据和 exec
-输出；原始包只能进入受控的加密存储，并设置保留期限。
+The Service is always `ClusterIP` and each CR has one Server replica. The Deployment uses `Recreate`: capability signatures and plans are Pod-local, so preventing old/new overlap avoids invalidating a `search` capability, losing a `plan` before `commit`, or keeping an old policy on traffic. The Service selects only a Pod revision derived from the current CR UID/generation, Server image, configuration, and TLS materials. Authentication, certificate, configuration, or resource reconciliation failure selects no backend and scales the Deployment to zero. The old policy is not restored until a full reconciliation succeeds. Updates and recovery can briefly be unavailable; `Ready=True` means only that the current revision is serving. Do not scale the Deployment manually or share one external identity without bounds across teams.
 
-## 运维安全清单
+## TLS and key handling
 
-- [ ] 镜像使用固定 tag/digest、来源可验证，并以非 root、只读根文件系统等
-      集群基线运行（具体安全上下文以部署清单为准）。
-- [ ] Operator 和 Server ServiceAccount 使用最小 RBAC；客户端身份不复用它们。
-- [ ] 所有 CR 显式评审 `mode`、`scope`、`policy`、`sensitiveReads` 和 limits。
-- [ ] 默认保留 `Redact`，只有有审批、短窗口和审计的场景才启用 `Allow` 或
-      `Dangerous`。
-- [ ] `ca.crt` 以只读配置分发，TLS 校验不关闭；token 在 Secret 管理器中轮换。
-- [ ] NetworkPolicy 只放行受控入站来源；另行验证 Server 到 kube-apiserver/DNS 的
-      Egress 连通性，入口不记录凭据。
-- [ ] 监控 TokenReview 失败、403、plan/commit 失败、exec 超限和证书轮换事件。
-- [ ] 卸载 CRD 或删除 Dangerous CR 前，先导出配置和审计记录并确认影响范围。
+With Operator-managed certificates, the leaf private key belongs only in a restricted Secret mounted into the Server; clients receive the CA. With `spec.tls.secretName`, the Secret must be same-namespace and type `kubernetes.io/tls`; the Operator verifies key matching, `ca.crt` trust chain, validity, ServerAuth usage, and `<name>.<namespace>.svc` SAN. Any failure sets `TLSReady=False`. Renewal is owned by the external certificate process. During rotation, confirm that the Server reloads the Secret and that clients refresh their CA/connection pool.
 
-## 安全故障排查
+The Operator namespace's `supek8smcp-serving-ca` is the shared root for all managed leaves. It contains `ca.crt` and `ca.key` and has no owner reference from an individual CR. Restrict reads, back it up, and include it in key rotation. The root CA is not replaced before expiry automatically; planned replacement requires deleting or replacing this Secret and refreshing client trust. Only a managed TLS Secret whose controller ownerReference points to the same CR may be validated or rotated; an unowned same-name Secret is rejected and the endpoint fails closed. Deleting the root generates a new root and re-signs owned leaves. Clients must fetch each CR's CA ConfigMap during the rotation window. The managed root is valid for about five years, leaves for about 90 days, and leaves are re-signed with fewer than 30 days remaining; verify that clients can reconnect.
 
-- **401**：检查 Bearer header、token 是否过期，及 TokenReview 是否可达；不要
-  通过改成 Operator token 来“修复”。
-- **403**：用同一 ServiceAccount 执行 `kubectl auth can-i`，然后检查 CR scope、
-  policy 和 mode；权限取交集，任一侧不足都会拒绝。
-- **TLS 错误**：核对 `status.caConfigMapName`、CA 内容、证书密钥匹配、信任链、
-  ServerAuth、SAN/有效期和客户端 ServerName；BYO Secret 任一校验失败都会使
-  `TLSReady=False`，不要使用 `-k`。
-- **plan/commit 失败**：计划是否超过两分钟、已被提交或身份已变；重新 plan，
-  不要重放旧计划。
-- **exec/attach 失败**：确认 Dangerous、目标资源合法、非交互、超时/字节/并发
-  预算未超限；TTY 和 port-forward 等未实现功能不会通过配置启用。
+For Secrets, the fixed TokenReview ClusterRole, and dynamic ClusterRoleBindings, the Operator uses live single-object reads rather than a shared informer cache containing every Secret or RBAC object. Its RBAC cannot list or watch Secrets. External TLS rotation is therefore discovered on the roughly five-minute reconciliation period, not by an event. Informers for ServiceAccounts, Services, ConfigMaps, Deployments, and NetworkPolicies watch only Operator-managed labels; reconciliation still reads the API directly to detect and repair label drift without caching every same-kind object in the cluster.
+
+If a diagnostic bundle must be exported, first redact YAML, Secrets, tokens, headers, resource data, and exec output. Store the raw bundle only in controlled encrypted storage with a retention limit.
+
+## Operational security checklist
+
+- [ ] Use verifiable image sources and immutable tags/digests; run with non-root and read-only-root-filesystem cluster baselines where the manifests support them.
+- [ ] Keep Operator and Server ServiceAccounts least-privileged; never reuse them for clients.
+- [ ] Place the Server in a dedicated restricted namespace; ordinary tenants cannot create Pods there, mount TLS Secrets, or use the Server ServiceAccount.
+- [ ] Explicitly review `mode`, `scope`, `policy`, `sensitiveReads`, and limits for every CR.
+- [ ] Keep `Redact` by default; enable `Allow` or `Dangerous` only with approval, a short window, and audit.
+- [ ] Distribute `ca.crt` read-only, never disable TLS checks, and rotate tokens through a Secret manager.
+- [ ] Allow only controlled ingress in NetworkPolicy; separately verify kube-apiserver/DNS Egress and ensure the gateway does not log credentials.
+- [ ] Monitor TokenReview failures, 403s, plan/commit failures, exec limits, and certificate rotation.
+- [ ] Collect `audit_schema=v1` with restricted access; if installing the optional PrometheusRule, tune authentication-failure, authorization-denial, rate-limit, and tool-error thresholds to the baseline.
+- [ ] Before CRD removal or deleting a Dangerous CR, export configuration and audit records and confirm the impact.
+
+## Security troubleshooting
+
+- **401:** Check the Bearer header and token expiry/validity; do not “fix” it by substituting an Operator token. **503** means TokenReview/delegated-client unavailability or waiting for `maxConcurrent` beyond `requestTimeout`; use the audit reason to check kube-apiserver connectivity, Server ServiceAccount permissions, and concurrency.
+- **403:** Run `kubectl auth can-i` as the same ServiceAccount, then inspect CR scope, policy, and mode. Permission is an intersection, so either side can deny it.
+- **TLS error:** Verify `status.caConfigMapName`, CA contents, key matching, trust chain, ServerAuth, SAN/validity, and client ServerName. Any BYO Secret validation failure sets `TLSReady=False`; do not use `-k`.
+- **Plan/commit failure:** Check the two-minute expiry, one-shot state, and identity; create a new plan rather than replaying it.
+- **Exec/attach failure:** Confirm Dangerous mode, a valid target, non-interactive input, and timeout/byte/concurrency budgets. TTY and port-forward cannot be enabled by configuration.

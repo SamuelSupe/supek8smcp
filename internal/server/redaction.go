@@ -56,6 +56,21 @@ func redactSecret(secret map[string]any) map[string]any {
 		}
 		copy[field] = redacted
 	}
+	metadata, ok := copy["metadata"].(map[string]any)
+	if !ok {
+		return copy
+	}
+	annotations, ok := metadata["annotations"].(map[string]any)
+	if !ok {
+		return copy
+	}
+	redactedAnnotations := make(map[string]any, len(annotations))
+	for key := range annotations {
+		redactedAnnotations[key] = "<redacted>"
+	}
+	metadata = cloneMap(metadata)
+	metadata["annotations"] = redactedAnnotations
+	copy["metadata"] = metadata
 	return copy
 }
 

@@ -1,0 +1,79 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: supek8smcp-servers
+  namespace: supek8smcp-system
+  labels:
+    app.kubernetes.io/name: supek8smcp
+    app.kubernetes.io/component: monitoring
+spec:
+  groups:
+    - name: supek8smcp.security
+      rules:
+        - alert: Supek8sMCPAuthenticationFailureRatioHigh
+          expr: |
+            (
+              sum by (namespace, service) (rate(supek8smcp_authentication_attempts_total{decision!="allow"}[5m]))
+              /
+              clamp_min(sum by (namespace, service) (rate(supek8smcp_authentication_attempts_total[5m])), 0.001)
+            ) > 0.20
+            and on (namespace, service)
+            sum by (namespace, service) (rate(supek8smcp_authentication_attempts_total[5m])) > 0.05
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: Kubernetes MCP authentication failure ratio is high
+            description: More than 20% of authentication attempts have failed or been denied for 10 minutes.
+        - alert: Supek8sMCPRateLimitRejectionsHigh
+          expr: |
+            sum by (namespace, service) (increase(supek8smcp_rate_limit_rejections_total[5m])) > 10
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: Kubernetes MCP identity rate limit is rejecting traffic
+            description: More than 10 authenticated requests were rate limited in five minutes.
+        - alert: Supek8sMCPDelegatedAuthenticationErrors
+          expr: |
+            sum by (namespace, service) (
+              increase(supek8smcp_authentication_attempts_total{decision="error",reason=~"tokenreview_error|delegated_client_error"}[5m])
+            ) > 5
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: Kubernetes MCP delegated authentication is failing
+            description: TokenReview or delegated Kubernetes client setup failed more than five times in five minutes.
+        - alert: Supek8sMCPAuthorizationDenialsHigh
+          expr: |
+            sum by (namespace, service) (
+              increase(supek8smcp_audit_events_total{
+                event="tool_call",
+                decision="deny",
+                reason=~"rbac_denied|scope_denied|policy_denied|mode_denied|sensitive_read_denied|unsafe_payload|identity_mismatch|kubernetes_forbidden|kubernetes_unauthorized"
+              }[5m])
+            ) > 20
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: Kubernetes MCP authorization denials are elevated
+            description: More than 20 MCP tool calls were denied in five minutes.
+    - name: supek8smcp.reliability
+      rules:
+        - alert: Supek8sMCPToolErrorRatioHigh
+          expr: |
+            (
+              sum by (namespace, service) (rate(supek8smcp_tool_calls_total{result="error"}[5m]))
+              /
+              clamp_min(sum by (namespace, service) (rate(supek8smcp_tool_calls_total[5m])), 0.001)
+            ) > 0.25
+            and on (namespace, service)
+            sum by (namespace, service) (rate(supek8smcp_tool_calls_total[5m])) > 0.05
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: Kubernetes MCP tool error ratio is high
+            description: More than 25% of MCP tool calls have failed for 10 minutes.

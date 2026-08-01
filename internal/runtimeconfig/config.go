@@ -70,6 +70,12 @@ func Load(path string) (Config, error) {
 	if cfg.Spec.Limits.MaxConcurrent == 0 {
 		cfg.Spec.Limits.MaxConcurrent = 4
 	}
+	if cfg.Spec.Limits.RequestsPerMinute == 0 {
+		cfg.Spec.Limits.RequestsPerMinute = 120
+	}
+	if cfg.Spec.Limits.Burst == 0 {
+		cfg.Spec.Limits.Burst = 20
+	}
 	if err := Validate(cfg); err != nil {
 		return Config{}, err
 	}
@@ -124,6 +130,12 @@ func Validate(cfg Config) error {
 	}
 	if cfg.Spec.Limits.MaxConcurrent < 1 || cfg.Spec.Limits.MaxConcurrent > 32 {
 		return fmt.Errorf("maxConcurrent must be between 1 and 32")
+	}
+	if cfg.Spec.Limits.RequestsPerMinute < 1 || cfg.Spec.Limits.RequestsPerMinute > 6000 {
+		return fmt.Errorf("requestsPerMinute must be between 1 and 6000")
+	}
+	if cfg.Spec.Limits.Burst < 1 || cfg.Spec.Limits.Burst > 1000 {
+		return fmt.Errorf("burst must be between 1 and 1000")
 	}
 	return nil
 }

@@ -2,11 +2,14 @@ package server
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/openapi3"
 )
+
+const maxSchemaExpansionNodes = 10_000
 
 func schemaForCapability(principal *Principal, capability Capability, fieldPath string, depth int) (any, error) {
 	root := openapi3.NewRoot(principal.Discovery.OpenAPIV3())
@@ -28,47 +31,76 @@ func schemaForCapability(principal *Principal, capability Capability, fieldPath 
 	if selected == nil {
 		return map[string]any{"available": false, "reason": "resource has no structural OpenAPI v3 schema"}, nil
 	}
-	expanded := expandSchema(selected, schemas, depth, map[string]bool{})
-	if fieldPath == "" {
-		return expanded, nil
+	if fieldPath != "" {
+		current := selected
+		for _, part := range strings.Split(fieldPath, ".") {
+			current = dereferenceSchema(current, schemas)
+			properties, _ := current["properties"].(map[string]any)
+			next, ok := properties[part].(map[string]any)
+			if !ok {
+				return nil, policyError("schema_path_not_found", fmt.Sprintf("field path %q does not exist", fieldPath))
+			}
+			current = next
+		}
+		selected = current
 	}
-	current, ok := expanded.(map[string]any)
-	if !ok {
-		return nil, policyError("schema_path_not_found", "schema root is not an object")
-	}
-	for _, part := range strings.Split(fieldPath, ".") {
-		properties, _ := current["properties"].(map[string]any)
-		next, ok := properties[part].(map[string]any)
+	budget := &schemaExpansionBudget{remaining: maxSchemaExpansionNodes}
+	return expandSchema(selected, schemas, depth, map[string]bool{}, budget), nil
+}
+
+func dereferenceSchema(current map[string]any, schemas map[string]any) map[string]any {
+	seen := map[string]bool{}
+	for {
+		reference, _ := current["$ref"].(string)
+		if !strings.HasPrefix(reference, "#/components/schemas/") || seen[reference] {
+			return current
+		}
+		seen[reference] = true
+		next, ok := schemas[strings.TrimPrefix(reference, "#/components/schemas/")].(map[string]any)
 		if !ok {
-			return nil, policyError("schema_path_not_found", fmt.Sprintf("field path %q does not exist", fieldPath))
+			return current
 		}
 		current = next
 	}
-	return current, nil
 }
 
-func schemaMatchesGVK(candidate map[string]any, capability Capability) bool {
-	extensions, _ := candidate["x-kubernetes-group-version-kind"].([]any)
-	for _, raw := range extensions {
-		gvk, _ := raw.(map[string]any)
-		group, _ := gvk["group"].(string)
-		version, _ := gvk["version"].(string)
-		kind, _ := gvk["kind"].(string)
-		if group == capability.Group && version == capability.Version && kind == capability.Kind {
-			return true
-		}
+type schemaExpansionBudget struct {
+	remaining int
+}
+
+func (b *schemaExpansionBudget) take() bool {
+	if b.remaining <= 0 {
+		return false
 	}
-	return false
+	b.remaining--
+	return true
 }
 
-func expandSchema(value any, schemas map[string]any, depth int, seen map[string]bool) any {
-	if depth < 0 {
-		return map[string]any{"truncated": true}
+func schemaTruncated() map[string]any {
+	return map[string]any{"truncated": true, "reason": "schema expansion budget reached"}
+}
+
+func sortedMapKeys(values map[string]any) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func expandSchema(value any, schemas map[string]any, depth int, seen map[string]bool, budget *schemaExpansionBudget) any {
+	if depth < 0 || !budget.take() {
+		return schemaTruncated()
 	}
 	if array, ok := value.([]any); ok {
-		expanded := make([]any, len(array))
-		for index, item := range array {
-			expanded[index] = expandSchema(item, schemas, depth, seen)
+		expanded := make([]any, 0, min(len(array), budget.remaining))
+		for _, item := range array {
+			if budget.remaining <= 0 {
+				expanded = append(expanded, schemaTruncated())
+				break
+			}
+			expanded = append(expanded, expandSchema(item, schemas, depth, seen, budget))
 		}
 		return expanded
 	}
@@ -87,24 +119,51 @@ func expandSchema(value any, schemas map[string]any, depth int, seen map[string]
 				copySeen[key] = enabled
 			}
 			copySeen[name] = true
-			return expandSchema(target, schemas, depth, copySeen)
+			return expandSchema(target, schemas, depth, copySeen, budget)
 		}
 	}
-	result := make(map[string]any, len(object))
-	for key, child := range object {
+	result := make(map[string]any, min(len(object), budget.remaining))
+	for _, key := range sortedMapKeys(object) {
+		if budget.remaining <= 0 {
+			result["x-supek8smcp-truncated"] = true
+			break
+		}
+		child := object[key]
 		switch key {
 		case "properties":
 			properties, _ := child.(map[string]any)
-			expanded := make(map[string]any, len(properties))
-			for property, propertySchema := range properties {
-				expanded[property] = expandSchema(propertySchema, schemas, depth-1, seen)
+			expanded := make(map[string]any, min(len(properties), budget.remaining))
+			for _, property := range sortedMapKeys(properties) {
+				if budget.remaining <= 0 {
+					expanded["x-supek8smcp-truncated"] = schemaTruncated()
+					break
+				}
+				expanded[property] = expandSchema(properties[property], schemas, depth-1, seen, budget)
 			}
 			result[key] = expanded
 		case "items", "additionalProperties", "oneOf", "anyOf", "allOf":
-			result[key] = expandSchema(child, schemas, depth-1, seen)
+			result[key] = expandSchema(child, schemas, depth-1, seen, budget)
 		default:
+			if !budget.take() {
+				result["x-supek8smcp-truncated"] = true
+				return result
+			}
 			result[key] = child
 		}
 	}
 	return result
+}
+
+func schemaMatchesGVK(candidate map[string]any, capability Capability) bool {
+	extensions, _ := candidate["x-kubernetes-group-version-kind"].([]any)
+	for _, raw := range extensions {
+		gvk, _ := raw.(map[string]any)
+		group, _ := gvk["group"].(string)
+		version, _ := gvk["version"].(string)
+		kind, _ := gvk["kind"].(string)
+		if group == capability.Group && version == capability.Version && kind == capability.Kind {
+			return true
+		}
+	}
+	return false
 }

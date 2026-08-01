@@ -104,6 +104,7 @@ func (a *App) commit(ctx context.Context, request *mcp.CallToolRequest, principa
 	if err != nil {
 		return CommitOutput{}, err
 	}
+	output := CommitOutput{Operation: operationSummary(operation)}
 	timeout := a.config.Spec.Limits.RequestTimeout.Duration
 	if operation.Action.Action == "exec" || operation.Action.Action == "attach" {
 		timeout = a.remoteTimeout(operation.TimeoutSeconds)
@@ -111,23 +112,30 @@ func (a *App) commit(ctx context.Context, request *mcp.CallToolRequest, principa
 	ctx, cancel := timeoutContext(ctx, timeout)
 	defer cancel()
 	if operation.Generation != a.config.Generation {
-		return CommitOutput{}, policyError("stale_plan", "server policy changed after the plan was created")
+		return output, policyError("stale_plan", "server policy changed after the plan was created")
 	}
 	if err := a.policy.CheckAndAuthorize(ctx, principal, operation.Action, operation.Namespace, operation.Name); err != nil {
-		return CommitOutput{}, err
+		return output, err
 	}
 	if err := a.checkOperationPreconditions(ctx, principal, operation); err != nil {
-		return CommitOutput{}, err
+		return output, err
+	}
+	if a.config.Spec.Mode == mcpv1alpha1.ModeSafeWrite {
+		validationOperation := operation
+		if _, _, err := a.previewOperation(ctx, principal, &validationOperation); err != nil {
+			return output, err
+		}
 	}
 	result, err := a.executeOperation(ctx, request, principal, operation)
 	if err != nil {
-		return CommitOutput{}, err
+		return output, err
 	}
 	redacted, err := redactResult(result, operation.Action, a.config.Spec.Policy.SensitiveReads)
 	if err != nil {
-		return CommitOutput{}, err
+		return output, err
 	}
-	return CommitOutput{Operation: operationSummary(operation), Result: boundedValue(redacted, a.config.Spec.Limits.MaxOutputBytes/2)}, nil
+	output.Result = boundedValue(redacted, a.config.Spec.Limits.MaxOutputBytes/2)
+	return output, nil
 }
 
 func (a *App) previewOperation(ctx context.Context, principal *Principal, operation *Operation) (any, []string, error) {
@@ -135,6 +143,7 @@ func (a *App) previewOperation(ctx context.Context, principal *Principal, operat
 	resource := dynamicResource(principal, action, operation.Namespace)
 	dryRun := []string{metav1.DryRunAll}
 	var preview any
+	var previous any
 	var warnings []string
 
 	switch action.Action {
@@ -170,6 +179,10 @@ func (a *App) previewOperation(ctx context.Context, principal *Principal, operat
 		}
 		operation.Name = object.GetName()
 		if current, err := resource.Get(ctx, operation.Name, metav1.GetOptions{}); err == nil {
+			if err := rejectOperatorManaged(current.GetLabels()); err != nil {
+				return nil, nil, err
+			}
+			previous = current.Object
 			operation.TargetUID = string(current.GetUID())
 			operation.ResourceVersion = current.GetResourceVersion()
 		} else if apierrors.IsNotFound(err) {
@@ -193,6 +206,12 @@ func (a *App) previewOperation(ctx context.Context, principal *Principal, operat
 		if err != nil {
 			return nil, nil, err
 		}
+		if err := rejectOperatorManaged(current.GetLabels()); err != nil {
+			return nil, nil, err
+		}
+		if action.Action != "scale" {
+			previous = current.Object
+		}
 		operation.TargetUID = string(current.GetUID())
 		operation.ResourceVersion = current.GetResourceVersion()
 		patchType, data, subresources, err := preparePatch(operation)
@@ -209,6 +228,10 @@ func (a *App) previewOperation(ctx context.Context, principal *Principal, operat
 		if err != nil {
 			return nil, nil, err
 		}
+		if err := rejectOperatorManaged(current.GetLabels()); err != nil {
+			return nil, nil, err
+		}
+		previous = current.Object
 		operation.TargetUID = string(current.GetUID())
 		operation.ResourceVersion = current.GetResourceVersion()
 		object, err := operationObject(operation)
@@ -227,6 +250,9 @@ func (a *App) previewOperation(ctx context.Context, principal *Principal, operat
 		if err != nil {
 			return nil, nil, err
 		}
+		if err := rejectOperatorManaged(current.GetLabels()); err != nil {
+			return nil, nil, err
+		}
 		operation.TargetUID = string(current.GetUID())
 		operation.ResourceVersion = current.GetResourceVersion()
 		uid := current.GetUID()
@@ -241,6 +267,9 @@ func (a *App) previewOperation(ctx context.Context, principal *Principal, operat
 	case "exec", "attach":
 		pod, err := principal.Kubernetes.CoreV1().Pods(operation.Namespace).Get(ctx, operation.Name, metav1.GetOptions{})
 		if err != nil {
+			return nil, nil, err
+		}
+		if err := rejectOperatorManaged(pod.Labels); err != nil {
 			return nil, nil, err
 		}
 		operation.TargetUID = string(pod.UID)
@@ -259,8 +288,27 @@ func (a *App) previewOperation(ctx context.Context, principal *Principal, operat
 	default:
 		return nil, nil, policyError("unsupported_operation", "operation is not implemented")
 	}
+	if a.config.Spec.Mode == mcpv1alpha1.ModeSafeWrite {
+		if err := validateSafeTransition(previous, preview); err != nil {
+			return nil, nil, err
+		}
+		if action.GVR.Group == "" && action.GVR.Resource == "services" {
+			if object, ok := preview.(map[string]any); ok {
+				if err := validateSafeServiceChange(object, nil, ""); err != nil {
+					return nil, nil, err
+				}
+			}
+		}
+	}
 	preview, err := redactResult(preview, action, a.config.Spec.Policy.SensitiveReads)
 	return preview, warnings, err
+}
+
+func rejectOperatorManaged(labels map[string]string) error {
+	if labels["app.kubernetes.io/managed-by"] == "supek8smcp-operator" {
+		return policyError("managed_resource_denied", "operator-managed resources may not be mutated through Kubernetes MCP")
+	}
+	return nil
 }
 
 func (a *App) executeOperation(ctx context.Context, request *mcp.CallToolRequest, principal *Principal, operation Operation) (map[string]any, error) {

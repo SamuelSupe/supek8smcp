@@ -15,10 +15,13 @@ import (
 	mcpv1alpha1 "github.com/samuelsupe/supek8smcp/api/v1alpha1"
 )
 
+const kubernetesListPageLimit int64 = 8
+
 type SearchInput struct {
 	Query     string `json:"query,omitempty" jsonschema:"kind, resource, API group, category, or action to search for"`
 	Action    string `json:"action,omitempty" jsonschema:"optional action or Kubernetes verb filter"`
 	Namespace string `json:"namespace,omitempty" jsonschema:"namespace used for scope and RBAC filtering"`
+	Name      string `json:"name,omitempty" jsonschema:"optional resource name for Kubernetes roles restricted by resourceNames"`
 	Cursor    string `json:"cursor,omitempty" jsonschema:"opaque cursor from a previous response"`
 	Limit     int64  `json:"limit,omitempty" jsonschema:"maximum capabilities to return"`
 }
@@ -39,7 +42,7 @@ func (a *App) search(ctx context.Context, principal *Principal, input SearchInpu
 	if limit <= 0 || limit > a.config.Spec.Limits.MaxListItems {
 		limit = min(a.config.Spec.Limits.MaxListItems, 20)
 	}
-	capabilities, next, err := searchCatalog(ctx, items, a.policy, principal, input.Query, input.Action, input.Namespace, input.Cursor, limit)
+	capabilities, next, err := searchCatalog(ctx, items, a.policy, principal, input.Query, input.Action, input.Namespace, input.Name, input.Cursor, limit)
 	if err != nil {
 		return SearchOutput{}, err
 	}
@@ -132,10 +135,7 @@ func (a *App) read(ctx context.Context, request *mcp.CallToolRequest, principal 
 		}
 		result = object.Object
 	case "list":
-		limit := input.Limit
-		if limit <= 0 || limit > a.config.Spec.Limits.MaxListItems {
-			limit = a.config.Spec.Limits.MaxListItems
-		}
+		limit := a.kubernetesListLimit(input.Limit)
 		list, err := dynamicResource(principal, action, namespace).List(ctx, metav1.ListOptions{
 			LabelSelector: input.LabelSelector, FieldSelector: input.FieldSelector, Limit: limit, Continue: input.Cursor,
 		})
@@ -162,6 +162,13 @@ func (a *App) read(ctx context.Context, request *mcp.CallToolRequest, principal 
 	}
 	output, _ := redacted.(map[string]any)
 	return boundedOutput(output, a.config.Spec.Limits.MaxOutputBytes), nil
+}
+
+func (a *App) kubernetesListLimit(requested int64) int64 {
+	if requested <= 0 || requested > a.config.Spec.Limits.MaxListItems {
+		requested = a.config.Spec.Limits.MaxListItems
+	}
+	return min(requested, kubernetesListPageLimit)
 }
 
 func (a *App) watch(ctx context.Context, request *mcp.CallToolRequest, principal *Principal, action Action, namespace string, input ReadInput) (map[string]any, error) {
@@ -241,6 +248,9 @@ func (a *App) logs(ctx context.Context, request *mcp.CallToolRequest, principal 
 	var lines []string
 	var size int64
 	for scanner.Scan() {
+		if int64(len(lines)) >= a.config.Spec.Limits.MaxListItems {
+			return map[string]any{"logs": lines, "truncated": true}, nil
+		}
 		line := scanner.Text()
 		size += int64(len(line) + 1)
 		if size > a.config.Spec.Limits.MaxOutputBytes {

@@ -2,7 +2,8 @@ apiVersion: mcp.supek8smcp.io/v1alpha1
 kind: KubernetesMCPServer
 metadata:
   name: team-readonly
-  namespace: default
+  # Create this dedicated namespace first and do not grant tenant Pod creation in it.
+  namespace: supek8smcp-servers
 spec:
   mode: ReadOnly
   scope:
@@ -13,3 +14,6 @@ spec:
     sensitiveReads: Redact
   networkPolicy:
     enabled: true
+    allowedNamespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: default

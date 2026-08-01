@@ -5,8 +5,14 @@ import (
 	"fmt"
 	"log/slog"
 
+	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
@@ -30,9 +36,25 @@ func Run(ctx context.Context, opts Options) error {
 		return fmt.Errorf("register MCP API: %w", err)
 	}
 	ctrl.SetLogger(zap.New(zap.UseDevMode(false)))
+	managedSelector := labels.SelectorFromSet(labels.Set{
+		"app.kubernetes.io/managed-by": "supek8smcp-operator",
+	})
+	uncachedObjects := []client.Object{
+		&corev1.Secret{}, &rbacv1.ClusterRole{}, &rbacv1.ClusterRoleBinding{},
+		&corev1.ServiceAccount{}, &corev1.Service{}, &corev1.ConfigMap{},
+		&appsv1.Deployment{}, &networkingv1.NetworkPolicy{},
+	}
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
-		Scheme:                 scheme,
+		Scheme: scheme,
+		Cache: cache.Options{ByObject: map[client.Object]cache.ByObject{
+			&corev1.ServiceAccount{}:      {Label: managedSelector},
+			&corev1.Service{}:             {Label: managedSelector},
+			&corev1.ConfigMap{}:           {Label: managedSelector},
+			&appsv1.Deployment{}:          {Label: managedSelector},
+			&networkingv1.NetworkPolicy{}: {Label: managedSelector},
+		}},
+		Client:                 client.Options{Cache: &client.CacheOptions{DisableFor: uncachedObjects}},
 		Metrics:                metricsserver.Options{BindAddress: opts.MetricsAddress},
 		HealthProbeBindAddress: opts.HealthAddress,
 		LeaderElection:         opts.LeaderElection,
@@ -48,15 +70,6 @@ func Run(ctx context.Context, opts Options) error {
 		ServerImage:       opts.ServerImage,
 		OperatorNamespace: opts.OperatorNamespace,
 		Logger:            opts.Logger,
-	}
-	if err := mgr.GetFieldIndexer().IndexField(ctx, &mcpv1alpha1.KubernetesMCPServer{}, tlsSecretIndexKey, func(object client.Object) []string {
-		server := object.(*mcpv1alpha1.KubernetesMCPServer)
-		if server.Spec.TLS.SecretName == "" {
-			return nil
-		}
-		return []string{server.Spec.TLS.SecretName}
-	}); err != nil {
-		return fmt.Errorf("index configured TLS Secrets: %w", err)
 	}
 	if err := reconciler.SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("setup controller: %w", err)

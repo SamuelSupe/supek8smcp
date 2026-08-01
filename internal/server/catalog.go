@@ -11,8 +11,11 @@ import (
 	"sync"
 	"time"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
+
+const searchAuthorizationCheckLimit = 100
 
 type catalogCache struct {
 	mu        sync.Mutex
@@ -28,13 +31,22 @@ func newCatalogCache(codec *capabilityCodec) *catalogCache {
 
 func (c *catalogCache) list(ctx context.Context, principal *Principal) ([]Capability, error) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	if time.Since(c.loadedAt) < c.cacheTime && len(c.items) > 0 {
-		return append([]Capability(nil), c.items...), nil
+		items := append([]Capability(nil), c.items...)
+		c.mu.Unlock()
+		return items, nil
 	}
-	resources, err := principal.Discovery.ServerPreferredResources()
-	if err != nil && len(resources) == 0 {
-		return nil, fmt.Errorf("discover Kubernetes resources: %w", err)
+	stale := append([]Capability(nil), c.items...)
+	c.mu.Unlock()
+	groups, discovered, err := principal.Discovery.ServerGroupsAndResources()
+	resources := preferredResourceLists(groups, discovered)
+	if err != nil {
+		if len(stale) > 0 {
+			return stale, nil
+		}
+		if len(resources) == 0 {
+			return nil, fmt.Errorf("discover Kubernetes resources: %w", err)
+		}
 	}
 
 	type resourceInfo struct {
@@ -135,9 +147,41 @@ func (c *catalogCache) list(ctx context.Context, principal *Principal) ([]Capabi
 		right := capabilities[j]
 		return left.Group+"/"+left.Version+"/"+left.Resource+"/"+left.Action < right.Group+"/"+right.Version+"/"+right.Resource+"/"+right.Action
 	})
-	c.items = capabilities
-	c.loadedAt = time.Now()
+	if err == nil {
+		c.mu.Lock()
+		c.items = capabilities
+		c.loadedAt = time.Now()
+		c.mu.Unlock()
+	}
 	return append([]Capability(nil), capabilities...), nil
+}
+
+func preferredResourceLists(groups []*metav1.APIGroup, resources []*metav1.APIResourceList) []*metav1.APIResourceList {
+	preferred := make(map[string]string, len(groups))
+	for _, group := range groups {
+		if group == nil {
+			continue
+		}
+		groupVersion := group.PreferredVersion.GroupVersion
+		if groupVersion == "" && group.PreferredVersion.Version != "" {
+			groupVersion = schema.GroupVersion{Group: group.Name, Version: group.PreferredVersion.Version}.String()
+		}
+		if groupVersion != "" {
+			preferred[group.Name] = groupVersion
+		}
+	}
+	selected := make([]*metav1.APIResourceList, 0, len(resources))
+	for _, resourceList := range resources {
+		if resourceList == nil {
+			continue
+		}
+		groupVersion, err := schema.ParseGroupVersion(resourceList.GroupVersion)
+		wanted, known := preferred[groupVersion.Group]
+		if err == nil && (!known || wanted == resourceList.GroupVersion) {
+			selected = append(selected, resourceList)
+		}
+	}
+	return selected
 }
 
 func searchCatalog(
@@ -145,7 +189,7 @@ func searchCatalog(
 	items []Capability,
 	policy *Policy,
 	principal *Principal,
-	query, wantedAction, namespace, cursor string,
+	query, wantedAction, namespace, name, cursor string,
 	limit int64,
 ) ([]Capability, string, error) {
 	query = strings.ToLower(strings.TrimSpace(query))
@@ -169,15 +213,24 @@ func searchCatalog(
 	}
 	result := make([]Capability, 0, limit)
 	index := start
+	authorizationChecks := 0
 	for index < len(filtered) && int64(len(result)) < limit {
 		capability := filtered[index]
-		index++
 		action := capability.AsAction()
 		targetNamespace := namespace
 		if action.Namespaced && targetNamespace == "" && len(policy.config.Spec.Scope.Namespaces) > 0 {
 			targetNamespace = policy.config.Spec.Scope.Namespaces[0]
 		}
-		if err := policy.CheckAndAuthorize(ctx, principal, action, targetNamespace, ""); err != nil {
+		if err := policy.CheckTarget(action, targetNamespace, name); err != nil {
+			index++
+			continue
+		}
+		if authorizationChecks >= searchAuthorizationCheckLimit {
+			break
+		}
+		authorizationChecks++
+		index++
+		if err := policy.Authorize(ctx, principal, action, targetNamespace, name); err != nil {
 			continue
 		}
 		result = append(result, capability)
