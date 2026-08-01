@@ -1,0 +1,15 @@
+apiVersion: mcp.supek8smcp.io/v1alpha1
+kind: KubernetesMCPServer
+metadata:
+  name: team-readonly
+  namespace: default
+spec:
+  mode: ReadOnly
+  scope:
+    namespaces:
+      - default
+    allowClusterScopedRead: false
+  policy:
+    sensitiveReads: Redact
+  networkPolicy:
+    enabled: true

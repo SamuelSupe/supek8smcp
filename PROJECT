@@ -1,0 +1,16 @@
+domain: supek8smcp.io
+layout:
+- go.kubebuilder.io/v4
+projectName: supek8smcp
+repo: github.com/samuelsupe/supek8smcp
+resources:
+- api:
+    crdVersion: v1
+    namespaced: true
+  controller: true
+  domain: supek8smcp.io
+  group: mcp
+  kind: KubernetesMCPServer
+  path: github.com/samuelsupe/supek8smcp/api/v1alpha1
+  version: v1alpha1
+version: "3"

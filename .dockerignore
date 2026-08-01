@@ -1,0 +1,6 @@
+.git
+.gitignore
+bin
+dist
+tmp
+*.log
