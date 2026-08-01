@@ -69,3 +69,19 @@ jobs:
         run: go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
       - name: Scan reachable Go code
         run: govulncheck ./...
+
+  helm:
+    name: Helm chart
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Verify Helm availability
+        run: helm version
+      - name: Require synchronized CRD
+        run: cmp config/crd/bases/mcp.supek8smcp.io_kubernetesmcpservers.yaml charts/supek8smcp/crds/mcp.supek8smcp.io_kubernetesmcpservers.yaml
+      - name: Lint and render chart
+        run: |
+          make helm-lint
+          make helm-template

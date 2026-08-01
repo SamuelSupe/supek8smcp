@@ -24,11 +24,11 @@ spec:
           type: RuntimeDefault
       containers:
         - name: manager
-          image: ghcr.io/samuelsupe/supek8smcp:0.1.0
+          image: ghcr.io/samuelsupe/supek8smcp:0.1.1
           imagePullPolicy: IfNotPresent
           args:
             - operator
-            - --server-image=ghcr.io/samuelsupe/supek8smcp:0.1.0
+            - --server-image=ghcr.io/samuelsupe/supek8smcp:0.1.1
             - --leader-elect=true
           env:
             - name: POD_NAMESPACE

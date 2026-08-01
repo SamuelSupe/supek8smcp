@@ -1,6 +1,14 @@
 # Changelog
 
-All notable changes to supek8smcp are documented here. This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) conventions. The repository currently records only the v0.1.0 release; no earlier version history is implied.
+All notable changes to supek8smcp are documented here. This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) conventions. The repository currently records the v0.1.1 and v0.1.0 releases; no earlier version history is implied.
+
+## [0.1.1] - 2026-08-02
+
+### Added
+
+- Added the v0.1.1 Helm chart, with the default image tag following `appVersion`, automatic Linux amd64/arm64 image selection, and CRD retention on Helm uninstall.
+- Published direct GitHub Release downloads for Linux x64 (amd64) and ARM64 archives, plus the release `checksums.txt` file.
+- Added Helm installation, upgrade, uninstall-order, and single-Operator-per-cluster guidance to the deployment documentation.
 
 ## [0.1.0] - 2026-08-01
 
@@ -27,4 +35,5 @@ All notable changes to supek8smcp are documented here. This project follows [Kee
 
 - No OAuth, port-forward, `cp`, proxy, evict, drain, TTY, JSON-RPC batch, multi-cluster routing, or multi-replica Server support.
 
+[0.1.1]: https://github.com/SamuelSupe/supek8smcp/releases/tag/v0.1.1
 [0.1.0]: https://github.com/samuelsupe/supek8smcp/releases/tag/v0.1.0

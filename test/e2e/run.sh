@@ -82,7 +82,7 @@ kubectl create namespace "${E2E_NAMESPACE}" >/dev/null
 sed \
   -e "s|supek8smcp-system|${OPERATOR_NAMESPACE}|g" \
   -e "s|name: supek8smcp-controller-manager-role$|name: supek8smcp-controller-manager-role-${RUN_ID}|g" \
-  -e "s|ghcr.io/samuelsupe/supek8smcp:0.1.0|${IMAGE}|g" \
+  -e "s|ghcr.io/samuelsupe/supek8smcp:0.1.1|${IMAGE}|g" \
   "${ROOT_DIR}/config/rbac/role.yaml" > "${TMP_DIR}/role.yaml"
 sed \
   -e "s|supek8smcp-system|${OPERATOR_NAMESPACE}|g" \
@@ -91,7 +91,7 @@ sed \
   "${ROOT_DIR}/config/rbac/role_binding.yaml" > "${TMP_DIR}/role_binding.yaml"
 sed \
   -e "s|supek8smcp-system|${OPERATOR_NAMESPACE}|g" \
-  -e "s|ghcr.io/samuelsupe/supek8smcp:0.1.0|${IMAGE}|g" \
+  -e "s|ghcr.io/samuelsupe/supek8smcp:0.1.1|${IMAGE}|g" \
   "${ROOT_DIR}/config/manager/manager.yaml" > "${TMP_DIR}/manager.yaml"
 sed "s|supek8smcp-system|${OPERATOR_NAMESPACE}|g" "${ROOT_DIR}/config/rbac/service_account.yaml" > "${TMP_DIR}/service_account.yaml"
 

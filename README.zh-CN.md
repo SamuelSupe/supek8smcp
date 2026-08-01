@@ -12,6 +12,19 @@
 [![GHCR](https://img.shields.io/badge/GHCR-container-2496ED?logo=docker&logoColor=white)](https://github.com/samuelsupe/supek8smcp/pkgs/container/supek8smcp)
 [![Go](https://img.shields.io/badge/go-1.25.12-00ADD8?logo=go&logoColor=white)](go.mod)
 
+## v0.1.1 下载
+
+- [Linux x64（amd64）压缩包](https://github.com/SamuelSupe/supek8smcp/releases/download/v0.1.1/supek8smcp_0.1.1_linux_amd64.tar.gz)
+- [Linux ARM64 压缩包](https://github.com/SamuelSupe/supek8smcp/releases/download/v0.1.1/supek8smcp_0.1.1_linux_arm64.tar.gz)
+- [SHA-256 校验和](https://github.com/SamuelSupe/supek8smcp/releases/download/v0.1.1/checksums.txt)
+
+直接从 GitHub Release 安装或升级 Operator chart：
+
+```bash
+helm upgrade --install supek8smcp https://github.com/SamuelSupe/supek8smcp/releases/download/v0.1.1/supek8smcp-0.1.1.tgz \
+  --namespace supek8smcp-system --create-namespace
+```
+
 `supek8smcp` 监听 `mcp.supek8smcp.io/v1alpha1/KubernetesMCPServer` 资源（简称 `kmcp`）。每个资源创建一个 HTTPS MCP Server、`ClusterIP` Service、TLS 材料，以及该 Server 所需的最小 TokenReview 绑定。Server 校验客户端的 Kubernetes Bearer Token，再使用同一个 Token 访问 Kubernetes API；端点不能授予调用者原本没有的 Kubernetes 权限。
 
 ## 提供的能力
@@ -70,7 +83,7 @@ flowchart LR
 
 ```bash
 make install
-make deploy IMG=ghcr.io/your-org/supek8smcp:0.1.0
+make deploy IMG=ghcr.io/your-org/supek8smcp:0.1.1
 kubectl create namespace supek8smcp-servers
 ```
 
@@ -110,7 +123,7 @@ kubectl -n supek8smcp-servers get svc -l app.kubernetes.io/instance=team-readonl
 构建并发布不可变镜像，然后安装 CRD 和 Operator：
 
 ```bash
-export IMG=registry.example.com/platform/supek8smcp:0.1.0
+export IMG=registry.example.com/platform/supek8smcp:0.1.1
 make docker-build IMG="$IMG"
 docker push "$IMG"
 make install
@@ -132,7 +145,7 @@ make fmt
 make vet
 make test
 make build
-make docker-build IMG=ghcr.io/your-org/supek8smcp:0.1.0
+make docker-build IMG=ghcr.io/your-org/supek8smcp:0.1.1
 ```
 
 API 类型变更时使用 `make manifests`，审查生成的 YAML，不要手工修改。发布镜像应使用不可变 tag 或 digest，并通过仓库的 release 自动化发布。提交改动或报告漏洞前请阅读 [`CHANGELOG.md`](CHANGELOG.md)、[`CONTRIBUTING.md`](CONTRIBUTING.md) 和 [`SECURITY.md`](SECURITY.md)。

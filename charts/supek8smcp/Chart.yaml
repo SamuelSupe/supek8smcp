@@ -1,0 +1,20 @@
+apiVersion: v2
+name: supek8smcp
+description: Kubernetes-native MCP server operator with delegated Kubernetes RBAC
+type: application
+version: 0.1.1
+appVersion: "0.1.1"
+home: https://github.com/SamuelSupe/supek8smcp
+icon: https://raw.githubusercontent.com/SamuelSupe/supek8smcp/main/docs/assets/supek8smcp-logo.png
+sources:
+  - https://github.com/SamuelSupe/supek8smcp
+keywords:
+  - kubernetes
+  - mcp
+  - operator
+  - rbac
+maintainers:
+  - name: SamuelSupe
+    url: https://github.com/SamuelSupe
+annotations:
+  artifacthub.io/category: integration-delivery

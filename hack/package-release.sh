@@ -4,8 +4,9 @@ set -eu
 
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 DIST_DIR="${ROOT_DIR}/dist"
-VERSION="${VERSION:-0.1.0}"
+VERSION="${VERSION:-0.1.1}"
 VERSION="${VERSION#v}"
+HELM="${HELM:-helm}"
 
 case "${VERSION}" in
   ""|*[!0-9A-Za-z.+-]*)
@@ -37,12 +38,28 @@ for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
   tar -czf "${DIST_DIR}/${ARCHIVE}.tar.gz" -C "${TMP_RELEASE_DIR}" "${ARCHIVE}"
 done
 
+if ! command -v "${HELM}" >/dev/null 2>&1; then
+  echo "helm is required to package the release chart" >&2
+  exit 1
+fi
+if ! cmp -s \
+  "${ROOT_DIR}/config/crd/bases/mcp.supek8smcp.io_kubernetesmcpservers.yaml" \
+  "${ROOT_DIR}/charts/supek8smcp/crds/mcp.supek8smcp.io_kubernetesmcpservers.yaml"; then
+  echo "Helm CRD is stale; run make manifests" >&2
+  exit 1
+fi
+"${HELM}" lint --strict "${ROOT_DIR}/charts/supek8smcp"
+"${HELM}" package "${ROOT_DIR}/charts/supek8smcp" \
+  --version "${VERSION}" \
+  --app-version "${VERSION}" \
+  --destination "${DIST_DIR}"
+
 (
   cd "${DIST_DIR}"
   if command -v sha256sum >/dev/null 2>&1; then
-    sha256sum ./*.tar.gz > checksums.txt
+    sha256sum ./*.tar.gz ./*.tgz > checksums.txt
   else
-    shasum -a 256 ./*.tar.gz > checksums.txt
+    shasum -a 256 ./*.tar.gz ./*.tgz > checksums.txt
   fi
 )
 

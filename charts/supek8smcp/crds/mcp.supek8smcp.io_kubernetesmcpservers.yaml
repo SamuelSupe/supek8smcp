@@ -1,0 +1,381 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.19.0
+  name: kubernetesmcpservers.mcp.supek8smcp.io
+spec:
+  group: mcp.supek8smcp.io
+  names:
+    kind: KubernetesMCPServer
+    listKind: KubernetesMCPServerList
+    plural: kubernetesmcpservers
+    shortNames:
+    - kmcp
+    singular: kubernetesmcpserver
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.mode
+      name: Mode
+      type: string
+    - jsonPath: .status.conditions[?(@.type=="Ready")].status
+      name: Ready
+      type: string
+    - jsonPath: .status.endpoint
+      name: Endpoint
+      type: string
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            properties:
+              limits:
+                default: {}
+                properties:
+                  burst:
+                    default: 20
+                    description: Burst is the maximum number of requests an identity
+                      may issue at once.
+                    format: int32
+                    maximum: 1000
+                    minimum: 1
+                    type: integer
+                  execTimeout:
+                    default: 30s
+                    type: string
+                  maxConcurrent:
+                    default: 4
+                    format: int32
+                    maximum: 32
+                    minimum: 1
+                    type: integer
+                  maxInputBytes:
+                    default: 262144
+                    format: int64
+                    maximum: 10485760
+                    minimum: 1024
+                    type: integer
+                  maxListItems:
+                    default: 100
+                    format: int64
+                    maximum: 1000
+                    minimum: 1
+                    type: integer
+                  maxOutputBytes:
+                    default: 1048576
+                    format: int64
+                    maximum: 52428800
+                    minimum: 1024
+                    type: integer
+                  requestTimeout:
+                    default: 30s
+                    type: string
+                  requestsPerMinute:
+                    default: 120
+                    description: |-
+                      RequestsPerMinute is the sustained MCP HTTP request budget for each
+                      authenticated Kubernetes identity within one Server pod.
+                    format: int32
+                    maximum: 6000
+                    minimum: 1
+                    type: integer
+                  streamTimeout:
+                    default: 60s
+                    type: string
+                type: object
+              mode:
+                default: ReadOnly
+                enum:
+                - ReadOnly
+                - SafeWrite
+                - Dangerous
+                type: string
+              networkPolicy:
+                default: {}
+                properties:
+                  allowedNamespaceSelector:
+                    description: |-
+                      A label selector is a label query over a set of resources. The result of matchLabels and
+                      matchExpressions are ANDed. An empty label selector matches all objects. A null
+                      label selector matches no objects.
+                    properties:
+                      matchExpressions:
+                        description: matchExpressions is a list of label selector
+                          requirements. The requirements are ANDed.
+                        items:
+                          description: |-
+                            A label selector requirement is a selector that contains values, a key, and an operator that
+                            relates the key and values.
+                          properties:
+                            key:
+                              description: key is the label key that the selector
+                                applies to.
+                              type: string
+                            operator:
+                              description: |-
+                                operator represents a key's relationship to a set of values.
+                                Valid operators are In, NotIn, Exists and DoesNotExist.
+                              type: string
+                            values:
+                              description: |-
+                                values is an array of string values. If the operator is In or NotIn,
+                                the values array must be non-empty. If the operator is Exists or DoesNotExist,
+                                the values array must be empty. This array is replaced during a strategic
+                                merge patch.
+                              items:
+                                type: string
+                              type: array
+                              x-kubernetes-list-type: atomic
+                          required:
+                          - key
+                          - operator
+                          type: object
+                        type: array
+                        x-kubernetes-list-type: atomic
+                      matchLabels:
+                        additionalProperties:
+                          type: string
+                        description: |-
+                          matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels
+                          map is equivalent to an element of matchExpressions, whose key field is "key", the
+                          operator is "In", and the values array contains only "value". The requirements are ANDed.
+                        type: object
+                    type: object
+                    x-kubernetes-map-type: atomic
+                  allowedPodSelector:
+                    description: |-
+                      A label selector is a label query over a set of resources. The result of matchLabels and
+                      matchExpressions are ANDed. An empty label selector matches all objects. A null
+                      label selector matches no objects.
+                    properties:
+                      matchExpressions:
+                        description: matchExpressions is a list of label selector
+                          requirements. The requirements are ANDed.
+                        items:
+                          description: |-
+                            A label selector requirement is a selector that contains values, a key, and an operator that
+                            relates the key and values.
+                          properties:
+                            key:
+                              description: key is the label key that the selector
+                                applies to.
+                              type: string
+                            operator:
+                              description: |-
+                                operator represents a key's relationship to a set of values.
+                                Valid operators are In, NotIn, Exists and DoesNotExist.
+                              type: string
+                            values:
+                              description: |-
+                                values is an array of string values. If the operator is In or NotIn,
+                                the values array must be non-empty. If the operator is Exists or DoesNotExist,
+                                the values array must be empty. This array is replaced during a strategic
+                                merge patch.
+                              items:
+                                type: string
+                              type: array
+                              x-kubernetes-list-type: atomic
+                          required:
+                          - key
+                          - operator
+                          type: object
+                        type: array
+                        x-kubernetes-list-type: atomic
+                      matchLabels:
+                        additionalProperties:
+                          type: string
+                        description: |-
+                          matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels
+                          map is equivalent to an element of matchExpressions, whose key field is "key", the
+                          operator is "In", and the values array contains only "value". The requirements are ANDed.
+                        type: object
+                    type: object
+                    x-kubernetes-map-type: atomic
+                  enabled:
+                    default: true
+                    type: boolean
+                type: object
+              policy:
+                default: {}
+                properties:
+                  rules:
+                    items:
+                      description: |-
+                        CapabilityRule is an upper bound applied before Kubernetes authorization.
+                        Verbs accepts Kubernetes verbs and the logical actions returned by k8s.search.
+                        An empty rule set selects the conservative defaults for the configured mode.
+                      properties:
+                        apiGroups:
+                          items:
+                            type: string
+                          minItems: 1
+                          type: array
+                        resources:
+                          items:
+                            type: string
+                          minItems: 1
+                          type: array
+                        verbs:
+                          items:
+                            enum:
+                            - get
+                            - list
+                            - watch
+                            - create
+                            - update
+                            - patch
+                            - delete
+                            - logs
+                            - scale
+                            - restart
+                            - apply
+                            - exec
+                            - attach
+                            - '*'
+                            type: string
+                          minItems: 1
+                          type: array
+                      required:
+                      - apiGroups
+                      - resources
+                      - verbs
+                      type: object
+                    type: array
+                  sensitiveReads:
+                    default: Redact
+                    enum:
+                    - Redact
+                    - Deny
+                    - Allow
+                    type: string
+                type: object
+              scope:
+                default: {}
+                properties:
+                  allowClusterScopedRead:
+                    type: boolean
+                  allowClusterScopedWrite:
+                    type: boolean
+                  namespaces:
+                    items:
+                      minLength: 1
+                      type: string
+                    type: array
+                type: object
+              tls:
+                default: {}
+                properties:
+                  secretName:
+                    description: |-
+                      SecretName references a kubernetes.io/tls Secret. When empty, the
+                      operator signs and rotates a serving certificate.
+                    minLength: 1
+                    type: string
+                type: object
+            type: object
+          status:
+            properties:
+              caConfigMapName:
+                type: string
+              conditions:
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+              endpoint:
+                type: string
+              observedGeneration:
+                format: int64
+                type: integer
+            type: object
+        type: object
+        x-kubernetes-validations:
+        - message: metadata.name must be a DNS service label with at most 63 characters
+          rule: size(self.metadata.name) <= 63 && self.metadata.name.matches('^[a-z]([-a-z0-9]*[a-z0-9])?$')
+        - message: cluster-scoped writes require Dangerous mode
+          rule: '!has(self.spec.scope) || !has(self.spec.scope.allowClusterScopedWrite)
+            || !self.spec.scope.allowClusterScopedWrite || self.spec.mode == ''Dangerous'''
+        - message: requestTimeout must be a positive Kubernetes duration
+          rule: '!has(self.spec.limits) || !has(self.spec.limits.requestTimeout) ||
+            duration(self.spec.limits.requestTimeout) > duration(''0s'')'
+        - message: streamTimeout must be a positive Kubernetes duration
+          rule: '!has(self.spec.limits) || !has(self.spec.limits.streamTimeout) ||
+            duration(self.spec.limits.streamTimeout) > duration(''0s'')'
+        - message: execTimeout must be a positive Kubernetes duration
+          rule: '!has(self.spec.limits) || !has(self.spec.limits.execTimeout) || duration(self.spec.limits.execTimeout)
+            > duration(''0s'')'
+    served: true
+    storage: true
+    subresources:
+      status: {}

@@ -16,7 +16,10 @@ MCP 客户端通过 HTTPS Streamable HTTP 访问它。示例假设使用 `kubect
   `tokenreviews.create`，也不会代持客户端 Bearer Token。Operator 会校验固定角色
   不是聚合角色且不含任何额外规则；角色缺失、不可校验、被扩权，或已有绑定
   指向其他角色时会撤掉异常绑定并报告 `AuthReady=False`。
-- 集群节点能拉取 Operator 镜像；若使用私有仓库，先配置 imagePullSecret。
+- 默认的 v0.1.1 镜像 `ghcr.io/samuelsupe/supek8smcp:0.1.1` 是公开的。Operator 命名空间
+  以及每个 KMCP 端点命名空间中的 Pod 都必须能够拉取同一个镜像。若使用私有镜像，
+  v0.1.1 chart 不会向生成的 Server Pod 分发或复制 registry 凭据；请通过节点运行时凭据
+  或其他集群机制，确保 Operator Pod 与所有生成的 Server Pod 都能拉取该镜像。
 - MCP 客户端支持 Streamable HTTP、Bearer header 和自定义 CA。
 
 ## 安装 Operator
@@ -24,7 +27,7 @@ MCP 客户端通过 HTTPS Streamable HTTP 访问它。示例假设使用 `kubect
 从源码构建并发布镜像：
 
 ```bash
-export IMG=registry.example.com/platform/supek8smcp:0.1.0
+export IMG=registry.example.com/platform/supek8smcp:0.1.1
 make docker-build IMG="$IMG"
 docker push "$IMG"
 ```
@@ -63,6 +66,49 @@ Operator 命名空间取 `POD_NAMESPACE`，未设置时为 `supek8smcp-system`�
 
 卸载 CRD 会删除该 CRD 下的自定义资源及其由 Operator 管理的工作负载；在
 生产集群执行前先备份 CR，并确认保留策略。
+
+## 使用 Helm 安装
+
+v0.1.1 chart 发布在 GitHub Release。首次安装或升级已有 release 都使用同一条命令：
+
+```bash
+helm upgrade --install supek8smcp \
+  https://github.com/SamuelSupe/supek8smcp/releases/download/v0.1.1/supek8smcp-0.1.1.tgz \
+  --namespace supek8smcp-system --create-namespace
+kubectl -n supek8smcp-system rollout status deploy/supek8smcp
+kubectl -n supek8smcp-system get deploy,pods
+```
+
+chart 默认将 `image.tag` 设为 `appVersion`，因此 v0.1.1 会拉取
+`ghcr.io/samuelsupe/supek8smcp:0.1.1`。该镜像发布为 Linux amd64/arm64 多架构
+manifest，节点运行时会自动选择匹配的架构。只有使用另行发布的镜像时才需要覆盖
+`image.repository`、`image.tag` 或 `image.digest`。
+
+Helm 的 `crds/` 机制只会在首次 install 时创建 CRD，upgrade 不会升级 CRD。升级 chart
+版本前，应先从对应 release tag/raw URL 或已下载源码应用 CRD，再确认其状态为
+Established，之后才执行 Helm upgrade：
+
+```bash
+kubectl apply -f https://raw.githubusercontent.com/SamuelSupe/supek8smcp/v0.1.1/config/crd/bases/mcp.supek8smcp.io_kubernetesmcpservers.yaml
+kubectl wait --for=condition=Established --timeout=60s crd/kubernetesmcpservers.mcp.supek8smcp.io
+```
+
+Helm 从 chart 的 `crds/` 目录安装 CRD，并在卸载 release 时保留该 CRD。卸载前必须
+删除所有命名空间中的 `KubernetesMCPServer`（KMCP），并等待 Operator finalizer 完成：
+
+```bash
+kubectl get kubernetesmcpservers --all-namespaces
+kubectl delete kubernetesmcpservers --all --all-namespaces
+helm uninstall supek8smcp --namespace supek8smcp-system
+```
+
+一个集群不要运行多个 `supek8smcp` Operator release；只安装一个集群级 Operator，
+再为各个端点创建 namespaced KMCP 资源。
+
+不要把 Helm 安装直接叠加到已有的 `make deploy`/Kustomize 安装上：固定的集群级 RBAC
+对象已经存在，Helm ownership 会冲突。迁移时先删除全部 KMCP 并等待 finalizer，再执行
+旧安装的 `make undeploy`，确认旧 Operator 已移除后再安装 chart。只有明确要删除 CRD
+时才执行 `make uninstall`。
 
 ## 创建 CR
 

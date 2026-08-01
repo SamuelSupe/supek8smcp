@@ -1,0 +1,10 @@
+SupeK8sMCP Operator {{ .Chart.AppVersion }} is installed in namespace {{ .Release.Namespace }}.
+
+Check the deployment:
+  kubectl -n {{ .Release.Namespace }} rollout status deploy/{{ include "supek8smcp.fullname" . }}
+  kubectl -n {{ .Release.Namespace }} get deploy,pods
+
+Before uninstalling, delete every KubernetesMCPServer (KMCP) and wait for its finalizers.
+Helm retains the CRD when this release is uninstalled.
+
+Install only one supek8smcp Operator release per cluster.

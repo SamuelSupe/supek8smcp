@@ -12,6 +12,19 @@ Turn a namespaced custom resource into a single-replica, HTTPS Streamable HTTP M
 [![GHCR](https://img.shields.io/badge/GHCR-container-2496ED?logo=docker&logoColor=white)](https://github.com/samuelsupe/supek8smcp/pkgs/container/supek8smcp)
 [![Go](https://img.shields.io/badge/go-1.25.12-00ADD8?logo=go&logoColor=white)](go.mod)
 
+## v0.1.1 downloads
+
+- [Linux x64 (amd64) archive](https://github.com/SamuelSupe/supek8smcp/releases/download/v0.1.1/supek8smcp_0.1.1_linux_amd64.tar.gz)
+- [Linux ARM64 archive](https://github.com/SamuelSupe/supek8smcp/releases/download/v0.1.1/supek8smcp_0.1.1_linux_arm64.tar.gz)
+- [SHA-256 checksums](https://github.com/SamuelSupe/supek8smcp/releases/download/v0.1.1/checksums.txt)
+
+Install or upgrade the Operator chart directly from the GitHub Release:
+
+```bash
+helm upgrade --install supek8smcp https://github.com/SamuelSupe/supek8smcp/releases/download/v0.1.1/supek8smcp-0.1.1.tgz \
+  --namespace supek8smcp-system --create-namespace
+```
+
 `supek8smcp` watches `mcp.supek8smcp.io/v1alpha1/KubernetesMCPServer` resources (also called `kmcp`). Each resource creates one HTTPS MCP Server, a `ClusterIP` Service, TLS material, and the minimum TokenReview binding needed by that Server. The Server validates the client's Kubernetes Bearer token, then uses the same token for the Kubernetes API: the endpoint cannot grant more Kubernetes access than the caller already has.
 
 ## What it provides
@@ -70,7 +83,7 @@ Create a dedicated endpoint namespace first. Anyone who can create a Pod there m
 
 ```bash
 make install
-make deploy IMG=ghcr.io/your-org/supek8smcp:0.1.0
+make deploy IMG=ghcr.io/your-org/supek8smcp:0.1.1
 kubectl create namespace supek8smcp-servers
 ```
 
@@ -110,7 +123,7 @@ Use `status.endpoint` and the CA from `status.caConfigMapName`; send a short-liv
 Build and publish an immutable image, then install the CRD and Operator:
 
 ```bash
-export IMG=registry.example.com/platform/supek8smcp:0.1.0
+export IMG=registry.example.com/platform/supek8smcp:0.1.1
 make docker-build IMG="$IMG"
 docker push "$IMG"
 make install
@@ -132,7 +145,7 @@ make fmt
 make vet
 make test
 make build
-make docker-build IMG=ghcr.io/your-org/supek8smcp:0.1.0
+make docker-build IMG=ghcr.io/your-org/supek8smcp:0.1.1
 ```
 
 Use `make manifests` when API types change; review generated YAML rather than editing it by hand. Release images should use immutable tags or digests and be published through the repository's release automation. See [`CHANGELOG.md`](CHANGELOG.md), [`CONTRIBUTING.md`](CONTRIBUTING.md), and [`SECURITY.md`](SECURITY.md) before opening a change or reporting a vulnerability.

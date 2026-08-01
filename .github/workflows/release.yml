@@ -26,10 +26,13 @@ jobs:
           go mod verify
           go vet ./...
           go test ./... -count=1
+          cmp config/crd/bases/mcp.supek8smcp.io_kubernetesmcpservers.yaml charts/supek8smcp/crds/mcp.supek8smcp.io_kubernetesmcpservers.yaml
+          make helm-lint
+          make helm-template
 
   assets:
-    name: Publish binaries
-    needs: validate
+    name: Publish binaries and Helm chart
+    needs: [validate, image]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
@@ -42,16 +45,27 @@ jobs:
         with:
           go-version-file: go.mod
           cache-dependency-path: go.sum
+      - name: Verify Helm availability
+        run: helm version
       - name: Build release archives
         run: VERSION="${GITHUB_REF_NAME#v}" make release
       - name: Create or update GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          version="${GITHUB_REF_NAME#v}"
+          assets=(
+            "dist/checksums.txt#SHA-256 checksums"
+            "dist/supek8smcp_${version}_linux_amd64.tar.gz#Linux x64 (amd64)"
+            "dist/supek8smcp_${version}_linux_arm64.tar.gz#Linux ARM64"
+            "dist/supek8smcp_${version}_darwin_amd64.tar.gz#macOS Intel x64 (amd64)"
+            "dist/supek8smcp_${version}_darwin_arm64.tar.gz#macOS Apple Silicon ARM64"
+            "dist/supek8smcp-${version}.tgz#Helm chart"
+          )
           if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
-            gh release upload "${GITHUB_REF_NAME}" dist/* --clobber
+            gh release upload "${GITHUB_REF_NAME}" "${assets[@]}" --clobber
           else
-            gh release create "${GITHUB_REF_NAME}" dist/* \
+            gh release create "${GITHUB_REF_NAME}" "${assets[@]}" \
               --verify-tag \
               --title "SupeK8sMCP ${GITHUB_REF_NAME}" \
               --generate-notes

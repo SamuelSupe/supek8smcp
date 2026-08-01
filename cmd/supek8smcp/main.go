@@ -13,7 +13,7 @@ import (
 	mcpserver "github.com/samuelsupe/supek8smcp/internal/server"
 )
 
-var version = "0.1.0"
+var version = "0.1.1"
 
 func main() {
 	if len(os.Args) < 2 {
