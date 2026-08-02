@@ -2,14 +2,19 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 	authorizationv1 "k8s.io/api/authorization/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -641,12 +646,15 @@ func TestSafeWriteCommitRevalidatesRiskyWorkloadDryRun(t *testing.T) {
 			map[string]any{"op": "replace", "path": "/spec/template/spec/containers/0/command", "value": []any{"server", "--safe"}},
 		}, PatchType: "json",
 	}
-	planID, _, err := app.plans.Create(principal.SubjectKey(), operation)
+	planID, confirmationCode, _, err := app.plans.Create(principal.SubjectKey(), operation)
 	if err != nil {
 		t.Fatalf("plans.Create() error = %v", err)
 	}
-	if _, err := app.commit(context.Background(), nil, principal, CommitInput{PlanID: planID}); policyReason(err) != "unsafe_payload" {
-		t.Fatalf("commit() error = %q, want unsafe_payload", err)
+	if _, err := app.commit(context.Background(), nil, principal, CommitInput{PlanID: planID}); policyReason(err) != "confirmation_required" {
+		t.Fatalf("commit() without confirmation error = %q, want confirmation_required", err)
+	}
+	if _, err := app.commit(context.Background(), nil, principal, CommitInput{PlanID: planID, ConfirmationCode: confirmationCode}); policyReason(err) != "unsafe_payload" {
+		t.Fatalf("commit() with confirmation error = %q, want unsafe_payload", err)
 	}
 }
 
@@ -744,22 +752,295 @@ func TestPlanStoreIsOneTimeAndIdentityBound(t *testing.T) {
 
 	store := NewPlanStore(2)
 	op := Operation{Action: policyTestAction("apps", "deployments", "patch", "patch", true), Namespace: "workloads", Name: "web"}
-	id, _, err := store.Create("identity-a", op)
+	id, code, _, err := store.Create("identity-a", op)
 	if err != nil {
 		t.Fatalf("Create() error = %v", err)
 	}
-	if _, err := store.Consume(id, "identity-b"); policyReason(err) != "identity_mismatch" {
+	if _, err := store.Consume(id, "identity-b", code); policyReason(err) != "identity_mismatch" {
 		t.Fatalf("wrong identity error = %v, want identity_mismatch", err)
 	}
-	got, err := store.Consume(id, "identity-a")
+	got, err := store.Consume(id, "identity-a", code)
 	if err != nil {
 		t.Fatalf("owner Consume() after mismatch error = %v", err)
 	}
 	if got.Name != op.Name || got.Namespace != op.Namespace {
 		t.Fatalf("consumed operation = %#v, want %#v", got, op)
 	}
-	if _, err := store.Consume(id, "identity-a"); policyReason(err) != "invalid_plan" {
+	if _, err := store.Consume(id, "identity-a", code); policyReason(err) != "invalid_plan" {
 		t.Fatalf("second consume error = %v, want invalid_plan", err)
+	}
+}
+
+func TestPlanStoreConfirmationValidationAndLock(t *testing.T) {
+	t.Parallel()
+
+	store := NewPlanStore(4)
+	op := Operation{Action: policyTestAction("apps", "deployments", "patch", "patch", true), Namespace: "workloads", Name: "web"}
+	id, code, _, err := store.Create("identity-a", op)
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	parsedCode, err := strconv.Atoi(code)
+	if err != nil || parsedCode < 100000 || parsedCode > 999999 {
+		t.Fatalf("confirmation code = %q, want six digits in [100000,999999]", code)
+	}
+
+	for _, malformed := range []string{"12345", "1234567", "12a456", "１２３４５６"} {
+		if _, err := store.Consume(id, "identity-a", malformed); policyReason(err) != "invalid_confirmation" {
+			t.Fatalf("malformed confirmation %q error = %v, want invalid_confirmation", malformed, err)
+		}
+	}
+	if failures := store.plans[id].ConfirmationFailures; failures != 0 {
+		t.Fatalf("malformed confirmation attempts counted as %d failures, want 0", failures)
+	}
+
+	wrongCode := "100000"
+	if wrongCode == code {
+		wrongCode = "100001"
+	}
+	for attempt := 1; attempt < confirmationMaxAttempts; attempt++ {
+		if _, err := store.Consume(id, "identity-a", wrongCode); policyReason(err) != "invalid_confirmation" {
+			t.Fatalf("wrong confirmation attempt %d error = %v, want invalid_confirmation", attempt, err)
+		}
+	}
+	if failures := store.plans[id].ConfirmationFailures; failures != confirmationMaxAttempts-1 {
+		t.Fatalf("wrong confirmation failures = %d, want %d", failures, confirmationMaxAttempts-1)
+	}
+	if _, err := store.Consume(id, "identity-a", "12345"); policyReason(err) != "invalid_confirmation" {
+		t.Fatalf("malformed confirmation after wrong attempts error = %v, want invalid_confirmation", err)
+	}
+	if failures := store.plans[id].ConfirmationFailures; failures != confirmationMaxAttempts-1 {
+		t.Fatalf("malformed confirmation changed failures to %d, want %d", failures, confirmationMaxAttempts-1)
+	}
+	if _, err := store.Consume(id, "identity-a", wrongCode); policyReason(err) != "confirmation_locked" {
+		t.Fatalf("final wrong confirmation error = %v, want confirmation_locked", err)
+	}
+	if _, ok := store.plans[id]; ok {
+		t.Fatalf("locked plan %q remains in the store", id)
+	}
+}
+
+func TestPlanStoreConfirmationCodeIsBoundToPlan(t *testing.T) {
+	t.Parallel()
+
+	store := NewPlanStore(8)
+	op := Operation{Action: policyTestAction("apps", "deployments", "patch", "patch", true), Namespace: "workloads", Name: "web"}
+	firstID, firstCode, _, err := store.Create("identity-a", op)
+	if err != nil {
+		t.Fatalf("first Create() error = %v", err)
+	}
+	secondID, secondCode, _, err := store.Create("identity-a", op)
+	if err != nil {
+		t.Fatalf("second Create() error = %v", err)
+	}
+	for secondCode == firstCode {
+		secondID, secondCode, _, err = store.Create("identity-a", op)
+		if err != nil {
+			t.Fatalf("retry Create() after confirmation collision error = %v", err)
+		}
+	}
+	if _, err := store.Consume(secondID, "identity-a", firstCode); policyReason(err) != "invalid_confirmation" {
+		t.Fatalf("cross-plan confirmation error = %v, want invalid_confirmation", err)
+	}
+	if _, err := store.Consume(secondID, "identity-a", secondCode); err != nil {
+		t.Fatalf("second plan correct confirmation error = %v", err)
+	}
+	if _, err := store.Consume(firstID, "identity-a", firstCode); err != nil {
+		t.Fatalf("first plan correct confirmation error = %v", err)
+	}
+}
+
+func TestPlanStoreCorrectConfirmationIsAtomic(t *testing.T) {
+	t.Parallel()
+
+	store := NewPlanStore(1)
+	op := Operation{Action: policyTestAction("apps", "deployments", "patch", "patch", true), Namespace: "workloads", Name: "web"}
+	id, code, _, err := store.Create("identity-a", op)
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	const callers = 32
+	start := make(chan struct{})
+	results := make(chan error, callers)
+	var wait sync.WaitGroup
+	wait.Add(callers)
+	for index := 0; index < callers; index++ {
+		go func() {
+			defer wait.Done()
+			<-start
+			_, err := store.Consume(id, "identity-a", code)
+			results <- err
+		}()
+	}
+	close(start)
+	wait.Wait()
+	close(results)
+
+	successes := 0
+	for err := range results {
+		if err == nil {
+			successes++
+			continue
+		}
+		if policyReason(err) != "invalid_plan" {
+			t.Fatalf("concurrent Consume() error = %v, want invalid_plan after one success", err)
+		}
+	}
+	if successes != 1 {
+		t.Fatalf("concurrent correct confirmations succeeded %d times, want exactly once", successes)
+	}
+}
+
+func TestPlanStoreExpiredPlanIsRemovedBeforeConfirmation(t *testing.T) {
+	t.Parallel()
+
+	store := NewPlanStore(1)
+	op := Operation{Action: policyTestAction("apps", "deployments", "patch", "patch", true), Namespace: "workloads", Name: "web"}
+	id, code, _, err := store.Create("identity-a", op)
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	store.plans[id] = func() storedPlan {
+		plan := store.plans[id]
+		plan.ExpiresAt = time.Now().Add(-time.Second)
+		return plan
+	}()
+	if _, err := store.Consume(id, "identity-a", code); policyReason(err) != "expired_plan" {
+		t.Fatalf("expired plan Consume() error = %v, want expired_plan", err)
+	}
+	if _, ok := store.plans[id]; ok {
+		t.Fatalf("expired plan %q remains in the store", id)
+	}
+}
+
+func confirmationTestPrincipal(t *testing.T) *Principal {
+	t.Helper()
+	kubernetesClient := k8sfake.NewSimpleClientset()
+	kubernetesClient.PrependReactor("create", "selfsubjectaccessreviews", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		return true, &authorizationv1.SelfSubjectAccessReview{
+			Status: authorizationv1.SubjectAccessReviewStatus{Allowed: true},
+		}, nil
+	})
+	return &Principal{
+		Username: "alice", UID: "uid-a",
+		Dynamic:    dynamicfake.NewSimpleDynamicClient(runtime.NewScheme()),
+		Kubernetes: kubernetesClient,
+	}
+}
+
+func TestPlanReturnsHumanConfirmationChallengeForWriteModes(t *testing.T) {
+	t.Parallel()
+
+	for _, mode := range []mcpv1alpha1.AccessMode{mcpv1alpha1.ModeSafeWrite, mcpv1alpha1.ModeDangerous} {
+		mode := mode
+		t.Run(string(mode), func(t *testing.T) {
+			t.Parallel()
+			cfg := policyTestConfig(mode, mcpv1alpha1.SensitiveReadAllow)
+			codec, err := newCapabilityCodec()
+			if err != nil {
+				t.Fatalf("newCapabilityCodec() error = %v", err)
+			}
+			app := &App{config: cfg, policy: NewPolicy(cfg), capabilities: codec, plans: NewPlanStore(4)}
+			principal := confirmationTestPrincipal(t)
+			capability := Capability{Version: "v1", Resource: "configmaps", Kind: "ConfigMap", Action: "create", Verb: "create", Namespaced: true}
+			output, err := app.plan(context.Background(), principal, PlanInput{
+				CapabilityID: codec.encode(capability), Namespace: "workloads",
+				Object: map[string]any{
+					"apiVersion": "v1", "kind": "ConfigMap",
+					"metadata": map[string]any{"name": "planned-config"},
+					"data":     map[string]any{"value": "planned"},
+				},
+			})
+			if err != nil {
+				t.Fatalf("plan() error = %v", err)
+			}
+			if output.PlanID == "" {
+				t.Fatal("plan() returned an empty planId")
+			}
+			if !output.Confirmation.Required {
+				t.Fatalf("plan() confirmation.required = false, want true: %#v", output.Confirmation)
+			}
+			parsedCode, err := strconv.Atoi(output.Confirmation.Code)
+			if err != nil || parsedCode < 100000 || parsedCode > 999999 {
+				t.Fatalf("plan() confirmation.code = %q, want six digits in [100000,999999]", output.Confirmation.Code)
+			}
+			instruction := strings.ToLower(output.Confirmation.Instruction)
+			if !strings.Contains(instruction, "human") || !strings.Contains(instruction, "later") {
+				t.Fatalf("plan() confirmation.instruction = %q, want explicit later human confirmation", output.Confirmation.Instruction)
+			}
+		})
+	}
+}
+
+func TestMCPCommitMissingConfirmationReturnsRequired(t *testing.T) {
+	t.Parallel()
+
+	app := newAuditTestApp(slog.Default())
+	app.config.Spec.Mode = mcpv1alpha1.ModeSafeWrite
+	app.plans = NewPlanStore(2)
+	principal := confirmationTestPrincipal(t)
+	op := Operation{Action: policyTestAction("", "configmaps", "create", "create", true), Namespace: "workloads", Name: "planned-config"}
+	planID, _, _, err := app.plans.Create(principal.SubjectKey(), op)
+	if err != nil {
+		t.Fatalf("plans.Create() error = %v", err)
+	}
+
+	server := app.newMCPServer(principal)
+	serverTransport, clientTransport := mcp.NewInMemoryTransports()
+	serverSession, err := server.Connect(context.Background(), serverTransport, nil)
+	if err != nil {
+		t.Fatalf("server.Connect() error = %v", err)
+	}
+	defer serverSession.Close()
+	client := mcp.NewClient(&mcp.Implementation{Name: "confirmation-test-client", Version: "test"}, nil)
+	clientSession, err := client.Connect(context.Background(), clientTransport, nil)
+	if err != nil {
+		t.Fatalf("client.Connect() error = %v", err)
+	}
+	defer clientSession.Close()
+
+	result, err := clientSession.CallTool(context.Background(), &mcp.CallToolParams{
+		Name: toolCommit, Arguments: map[string]any{"planId": planID},
+	})
+	if err != nil {
+		t.Fatalf("CallTool(k8s.commit) protocol error = %v", err)
+	}
+	if result == nil || !result.IsError {
+		t.Fatalf("CallTool(k8s.commit) result = %#v, want an error result", result)
+	}
+	data, err := json.Marshal(result)
+	if err != nil {
+		t.Fatalf("marshal k8s.commit error result: %v", err)
+	}
+	if !strings.Contains(string(data), "confirmation_required") {
+		t.Fatalf("k8s.commit missing confirmation result = %s, want confirmation_required", data)
+	}
+}
+
+func TestDecodeCommitInputDistinguishesMissingAndExplicitConfirmation(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		arguments  json.RawMessage
+		wantReason string
+	}{
+		{name: "missing field", arguments: json.RawMessage(`{"planId":"plan-1"}`)},
+		{name: "explicit empty string", arguments: json.RawMessage(`{"planId":"plan-1","confirmationCode":""}`), wantReason: "invalid_confirmation"},
+		{name: "explicit null", arguments: json.RawMessage(`{"planId":"plan-1","confirmationCode":null}`), wantReason: "invalid_confirmation"},
+		{name: "malformed digits", arguments: json.RawMessage(`{"planId":"plan-1","confirmationCode":"12345"}`), wantReason: "invalid_confirmation"},
+		{name: "valid format", arguments: json.RawMessage(`{"planId":"plan-1","confirmationCode":"123456"}`)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			input, err := decodeCommitInput(tt.arguments)
+			if got := policyReason(err); got != tt.wantReason {
+				t.Fatalf("decodeCommitInput() reason = %q, want %q (error: %v)", got, tt.wantReason, err)
+			}
+			if input.PlanID != "plan-1" {
+				t.Fatalf("decodeCommitInput() planId = %q, want plan-1", input.PlanID)
+			}
+		})
 	}
 }
 
@@ -768,7 +1049,7 @@ func TestPlanStoreByteBudgetsArePerIdentityAndReleasedOnConsume(t *testing.T) {
 
 	store := NewPlanStore(4)
 	op := Operation{Action: policyTestAction("apps", "deployments", "patch", "patch", true), Namespace: "workloads", Name: "web"}
-	firstID, _, err := store.Create("identity-a", op)
+	firstID, firstCode, _, err := store.Create("identity-a", op)
 	if err != nil {
 		t.Fatalf("initial Create() error = %v", err)
 	}
@@ -779,25 +1060,25 @@ func TestPlanStoreByteBudgetsArePerIdentityAndReleasedOnConsume(t *testing.T) {
 	store.maxBytes = planSize * 2
 	store.maxSubjectBytes = planSize
 
-	if _, _, err := store.Create("identity-a", op); policyReason(err) != "plan_capacity" {
+	if _, _, _, err := store.Create("identity-a", op); policyReason(err) != "plan_capacity" {
 		t.Fatalf("same-identity byte overflow error = %v, want plan_capacity", err)
 	}
-	secondID, _, err := store.Create("identity-b", op)
+	secondID, secondCode, _, err := store.Create("identity-b", op)
 	if err != nil {
 		t.Fatalf("different identity Create() error = %v, want global budget to allow it", err)
 	}
 
-	if _, err := store.Consume(firstID, "identity-a"); err != nil {
+	if _, err := store.Consume(firstID, "identity-a", firstCode); err != nil {
 		t.Fatalf("Consume() error = %v", err)
 	}
-	thirdID, _, err := store.Create("identity-a", op)
+	thirdID, thirdCode, _, err := store.Create("identity-a", op)
 	if err != nil {
 		t.Fatalf("Create() after Consume() error = %v, want released byte budget", err)
 	}
-	if _, err := store.Consume(thirdID, "identity-a"); err != nil {
+	if _, err := store.Consume(thirdID, "identity-a", thirdCode); err != nil {
 		t.Fatalf("released plan Consume() error = %v", err)
 	}
-	if _, err := store.Consume(secondID, "identity-b"); err != nil {
+	if _, err := store.Consume(secondID, "identity-b", secondCode); err != nil {
 		t.Fatalf("cleanup Consume() error = %v", err)
 	}
 }

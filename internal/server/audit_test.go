@@ -111,7 +111,7 @@ func TestRecordToolAuditIncludesContextWithoutSensitivePayloads(t *testing.T) {
 		Action: "patch", APIGroup: "apps", APIVersion: "v1", Resource: "deployments",
 		Namespace: "workloads", Name: "web",
 	}
-	sensitive := "token-should-never-be-logged plan-id-123 resource-object patch-body command stdin output-content"
+	sensitive := "token-should-never-be-logged plan-id-123 confirmation-code-654321 resource-object patch-body command stdin output-content"
 	app.recordTool(principal, "k8s.commit", target, time.Now().Add(-time.Millisecond), &toolError{Reason: "policy_denied", Message: sensitive})
 
 	record := handler.latest()
@@ -147,7 +147,7 @@ func TestRecordToolAuditIncludesContextWithoutSensitivePayloads(t *testing.T) {
 			t.Fatalf("audit record contains sensitive payload %q: %s", forbidden, serialized)
 		}
 	}
-	for _, forbiddenKey := range []string{"token", "plan_id", "object", "patch_body", "command", "stdin", "output"} {
+	for _, forbiddenKey := range []string{"token", "plan_id", "planId", "confirmation_code", "confirmationCode", "object", "patch_body", "command", "stdin", "output"} {
 		if _, ok := record[forbiddenKey]; ok {
 			t.Fatalf("audit record unexpectedly contains sensitive field %q: %#v", forbiddenKey, record)
 		}

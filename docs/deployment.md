@@ -7,7 +7,7 @@ This guide installs the `supek8smcp` Operator, creates a `KubernetesMCPServer`, 
 - A Kubernetes cluster and a `kubectl` version that supports `kubectl create token` (use an equivalent short-lived ServiceAccount token flow on older clusters).
 - Administrator permission to install the CRD and create namespaces, RBAC, Deployments, Services, ConfigMaps, Secrets, and NetworkPolicies.
 - The deployment manifests must provide the fixed `supek8smcp-tokenreviewer` ClusterRole. It lets a Server ServiceAccount create TokenReviews; the Operator creates one corresponding ClusterRoleBinding per CR. The Operator ClusterRole may only `get` and `bind` that fixed `resourceName`; it does not have `tokenreviews.create` and never holds a client Bearer token. The Operator verifies that the role is not aggregated and contains no extra rules. If the role is missing, unverifiable, expanded, or an existing binding points at another role, abnormal bindings are removed and `AuthReady=False` is reported.
-- The default v0.1.1 image, `ghcr.io/samuelsupe/supek8smcp:0.1.1`, is public. Pods in the Operator namespace and in every KMCP endpoint namespace must be able to pull that same image. For a private image, the v0.1.1 chart does not distribute or copy registry credentials into generated Server Pods; use node-runtime credentials or another cluster mechanism that lets both the Operator and every generated Server Pod pull it.
+- The default v0.2.0 image, `ghcr.io/samuelsupe/supek8smcp:0.2.0`, is public. Pods in the Operator namespace and in every KMCP endpoint namespace must be able to pull that same image. For a private image, the v0.2.0 chart does not distribute or copy registry credentials into generated Server Pods; use node-runtime credentials or another cluster mechanism that lets both the Operator and every generated Server Pod pull it.
 - An MCP client that supports Streamable HTTP, a Bearer header, and a custom CA.
 
 ## Install the Operator
@@ -15,7 +15,7 @@ This guide installs the `supek8smcp` Operator, creates a `KubernetesMCPServer`, 
 Build and publish an image:
 
 ```bash
-export IMG=registry.example.com/platform/supek8smcp:0.1.1
+export IMG=registry.example.com/platform/supek8smcp:0.2.0
 make docker-build IMG="$IMG"
 docker push "$IMG"
 ```
@@ -43,22 +43,24 @@ Deleting the CRD deletes its custom resources and Operator-managed workloads. Ba
 
 ## Install with Helm
 
-The v0.1.1 chart is available from the GitHub Release. Install it, or run the same command to upgrade an existing release:
+The v0.2.0 chart is available from the GitHub Release. Install it, or run the same command to upgrade an existing release:
 
 ```bash
 helm upgrade --install supek8smcp \
-  https://github.com/SamuelSupe/supek8smcp/releases/download/v0.1.1/supek8smcp-0.1.1.tgz \
+  https://github.com/SamuelSupe/supek8smcp/releases/download/v0.2.0/supek8smcp-0.2.0.tgz \
   --namespace supek8smcp-system --create-namespace
 kubectl -n supek8smcp-system rollout status deploy/supek8smcp
 kubectl -n supek8smcp-system get deploy,pods
 ```
 
-The chart defaults `image.tag` to `appVersion`, so v0.1.1 pulls `ghcr.io/samuelsupe/supek8smcp:0.1.1`. That image is published as a Linux amd64/arm64 multi-architecture manifest; the node runtime selects the matching architecture automatically. Override `image.repository`, `image.tag`, or `image.digest` only when using a separately published image.
+The chart defaults `image.tag` to `appVersion`, so v0.2.0 pulls `ghcr.io/samuelsupe/supek8smcp:0.2.0`. That image is published as a Linux amd64/arm64 multi-architecture manifest; the node runtime selects the matching architecture automatically. Override `image.repository`, `image.tag`, or `image.digest` only when using a separately published image.
+
+v0.2.0 changes the write-tool contract: every SafeWrite/Dangerous `k8s.commit` now requires the `confirmationCode` returned by `k8s.plan` and repeated by a human. Upgrade MCP clients before rolling out the v0.2.0 Server image; v0.1.x commit payloads containing only `planId` are rejected.
 
 Helm's `crds/` mechanism creates the CRD only on the first install; Helm does not upgrade CRDs. Before a chart version upgrade, apply the matching CRD from that release tag/raw URL or from downloaded source, then confirm it is Established before running the Helm upgrade:
 
 ```bash
-kubectl apply -f https://raw.githubusercontent.com/SamuelSupe/supek8smcp/v0.1.1/config/crd/bases/mcp.supek8smcp.io_kubernetesmcpservers.yaml
+kubectl apply -f https://raw.githubusercontent.com/SamuelSupe/supek8smcp/v0.2.0/config/crd/bases/mcp.supek8smcp.io_kubernetesmcpservers.yaml
 kubectl wait --for=condition=Established --timeout=60s crd/kubernetesmcpservers.mcp.supek8smcp.io
 ```
 
@@ -279,7 +281,7 @@ When TokenReview or the delegated client is temporarily unavailable, the Server 
 
 ### A write is denied or commit fails
 
-SafeWrite/Dangerous persistent writes must call `k8s.plan` first and call `k8s.commit` within two minutes using the same identity. Plans are one-shot; expiration, duplicate submission, or token/request-context mismatch requires a new plan. ReadOnly never exposes write tools. SafeWrite compares the pre-change object with the kube-apiserver dry-run result; parent replacement, `null`, or omitted fields that remove existing container/Pod security constraints are rejected as `unsafe_payload`. Deliberately weakening a constraint requires an explicitly authorized Dangerous Server and Kubernetes RBAC.
+SafeWrite/Dangerous writes must call `k8s.plan`, show its preview and six-digit code to a human, then wait for the human to repeat the code in a later user message. Call `k8s.commit` within two minutes with both `planId` and `confirmationCode` using the same identity. Missing/malformed codes are rejected; five incorrect six-digit attempts invalidate the plan. Plans are one-shot, and a correctly confirmed plan is consumed even if a later safety or Kubernetes check fails. Expiration, replay, or token/request-context mismatch requires a new plan. ReadOnly never exposes write tools. SafeWrite still compares the pre-change object with the kube-apiserver dry-run result and rejects unsafe constraint removal. Because the model can see the code, use an external approval gateway when verified human approval is required.
 
 ### exec/attach fails
 

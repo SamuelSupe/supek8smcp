@@ -408,7 +408,15 @@ func (h *harness) safeWriteConfigMap(ctx context.Context, client *mcpClient) {
 	if planned.PlanID == "" {
 		h.t.Fatal("SafeWrite plan returned no planId")
 	}
-	h.call(ctx, client, "k8s.commit", map[string]any{"planId": planned.PlanID})
+	missingConfirmation := map[string]any{"planId": planned.PlanID}
+	h.callExpectError(ctx, client, "k8s.commit", missingConfirmation)
+	wrongConfirmation := "100000"
+	if wrongConfirmation == planned.Confirmation.Code {
+		wrongConfirmation = "100001"
+	}
+	h.callExpectError(ctx, client, "k8s.commit", map[string]any{"planId": planned.PlanID, "confirmationCode": wrongConfirmation})
+	h.assertConfigMapAbsent(ctx, "mcp-e2e-persisted")
+	h.call(ctx, client, "k8s.commit", h.confirmationCommitArguments(planned))
 	h.assertConfigMap(ctx, "mcp-e2e-persisted", "created-by-safe-write")
 
 	search = h.call(ctx, client, "k8s.search", map[string]any{
@@ -424,7 +432,13 @@ func (h *harness) safeWriteConfigMap(ctx context.Context, client *mcpClient) {
 		"patchType": "merge", "patch": map[string]any{"data": map[string]string{"value": "modified-by-safe-write"}},
 	})
 	h.decode(plan, &planned)
-	h.call(ctx, client, "k8s.commit", map[string]any{"planId": planned.PlanID})
+	wrongConfirmation = "100000"
+	if wrongConfirmation == planned.Confirmation.Code {
+		wrongConfirmation = "100001"
+	}
+	h.callExpectError(ctx, client, "k8s.commit", map[string]any{"planId": planned.PlanID, "confirmationCode": wrongConfirmation})
+	h.assertConfigMap(ctx, "mcp-e2e-persisted", "created-by-safe-write")
+	h.call(ctx, client, "k8s.commit", h.confirmationCommitArguments(planned))
 	h.assertConfigMap(ctx, "mcp-e2e-persisted", "modified-by-safe-write")
 }
 
@@ -447,7 +461,7 @@ func (h *harness) dangerousRemoteExecution(ctx context.Context, client *mcpClien
 	})
 	var planned planOutput
 	h.decode(plan, &planned)
-	result := h.call(ctx, client, "k8s.commit", map[string]any{"planId": planned.PlanID})
+	result := h.call(ctx, client, "k8s.commit", h.confirmationCommitArguments(planned))
 	var commit struct {
 		Result struct {
 			Stdout string `json:"stdout"`
@@ -472,7 +486,7 @@ func (h *harness) dangerousRemoteExecution(ctx context.Context, client *mcpClien
 		"container": "attach", "stdin": "attach-input", "timeoutSeconds": 8,
 	})
 	h.decode(plan, &planned)
-	result = h.call(ctx, client, "k8s.commit", map[string]any{"planId": planned.PlanID})
+	result = h.call(ctx, client, "k8s.commit", h.confirmationCommitArguments(planned))
 	h.decode(result, &commit)
 	if !strings.Contains(commit.Result.Stdout, "attach-ok") {
 		h.t.Fatalf("Dangerous attach did not return expected stdout (stdout=%q stderr=%q)", commit.Result.Stdout, commit.Result.Stderr)

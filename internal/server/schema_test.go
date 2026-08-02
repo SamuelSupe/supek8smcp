@@ -11,6 +11,28 @@ import (
 	"k8s.io/client-go/openapi/openapitest"
 )
 
+func TestCommitInputSchemaRequiresConfirmationCode(t *testing.T) {
+	t.Parallel()
+
+	schema, err := newCommitInputSchema()
+	if err != nil {
+		t.Fatalf("newCommitInputSchema() error = %v", err)
+	}
+	if !containsString(schema.Required, "planId") {
+		t.Fatalf("CommitInput schema required fields = %v, want planId", schema.Required)
+	}
+	if !containsString(schema.Required, "confirmationCode") {
+		t.Fatalf("CommitInput schema required fields = %v, want confirmationCode", schema.Required)
+	}
+	confirmation, ok := schema.Properties["confirmationCode"]
+	if !ok || confirmation.Type != "string" {
+		t.Fatalf("CommitInput confirmationCode schema = %#v, want string property", confirmation)
+	}
+	if confirmation.Pattern != confirmationCodePattern {
+		t.Fatalf("CommitInput confirmationCode pattern = %q, want %q", confirmation.Pattern, confirmationCodePattern)
+	}
+}
+
 type schemaTestDiscovery struct {
 	discovery.DiscoveryInterface
 	client openapi.Client

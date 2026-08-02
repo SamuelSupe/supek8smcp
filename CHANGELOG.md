@@ -1,6 +1,19 @@
 # Changelog
 
-All notable changes to supek8smcp are documented here. This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) conventions. The repository currently records the v0.1.1 and v0.1.0 releases; no earlier version history is implied.
+All notable changes to supek8smcp are documented here. This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) conventions. The repository currently records releases from v0.1.0 onward; no earlier version history is implied.
+
+## [0.2.0] - 2026-08-02
+
+### Changed
+
+- `k8s.plan` now returns a six-digit confirmation challenge for every SafeWrite and Dangerous operation, and `k8s.commit` requires both the one-time `planId` and the code repeated by a human in a later user message.
+- This is an intentional breaking MCP tool-contract change. Existing write clients must provide `confirmationCode` when upgrading from v0.1.x.
+
+### Security
+
+- Confirmation codes are generated with `crypto/rand`, stored only as plan-bound digests, share the two-minute plan lifetime, and lock the plan after five well-formed incorrect attempts.
+- Correct confirmation is identity-bound and atomically consumes the plan before existing policy, RBAC, object-precondition, and execution checks. Audit logs and metric labels exclude plan IDs and confirmation codes.
+- The built-in manual and security guidance explicitly state that a code visible to the model is a compliance guard, not cryptographic proof of human approval; verified separation of duties still requires an external approval gateway.
 
 ## [0.1.1] - 2026-08-02
 
@@ -35,5 +48,6 @@ All notable changes to supek8smcp are documented here. This project follows [Kee
 
 - No OAuth, port-forward, `cp`, proxy, evict, drain, TTY, JSON-RPC batch, multi-cluster routing, or multi-replica Server support.
 
+[0.2.0]: https://github.com/SamuelSupe/supek8smcp/releases/tag/v0.2.0
 [0.1.1]: https://github.com/SamuelSupe/supek8smcp/releases/tag/v0.1.1
 [0.1.0]: https://github.com/samuelsupe/supek8smcp/releases/tag/v0.1.0

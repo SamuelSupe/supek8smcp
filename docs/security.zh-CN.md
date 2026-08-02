@@ -51,8 +51,8 @@ token 和最小 Role/ClusterRole。
 | 模式 | 工具 | 主要边界 |
 | --- | --- | --- |
 | `ReadOnly` | `k8s.help`、`k8s.search`、`k8s.describe`、`k8s.read` | 手册只返回内置静态说明；资源仅读取，Pod 日志只允许一次性 `follow=false`，不能持久写或 exec/attach |
-| `SafeWrite` | 上述只读工具 + `k8s.plan`、`k8s.commit` | Pod 日志仍只允许 `follow=false`；所有持久写必须先 plan，再在两分钟内一次性 commit |
-| `Dangerous` | SafeWrite 全部工具 + `follow=true` 持续日志、有界非交互 exec/attach | 日志流受 `streamTimeout`/`maxOutputBytes`，exec/attach 受 `execTimeout`/`maxOutputBytes` 等限制；不提供 TTY |
+| `SafeWrite` | 上述只读工具 + `k8s.plan`、`k8s.commit` | Pod 日志仍只允许 `follow=false`；每次写入都要求计划和人类在后续用户消息中复述的 6 位确认码 |
+| `Dangerous` | SafeWrite 全部工具 + `follow=true` 持续日志、有界非交互 exec/attach | 同样强制人工确认码；日志流和远程执行仍有界；不提供 TTY |
 
 `k8s.help` 在三种模式中始终直接暴露。无参数调用只给出工具索引和当前模式
 `available` 状态；使用索引中的 `detailsRequest` 再调用一次，才加载单个工具的
@@ -61,11 +61,19 @@ token 和最小 Role/ClusterRole。
 不执行 discovery、资源读取或写入，但请求仍必须完成 TokenReview，并计入身份限流
 与 `audit_schema=v1` 审计。
 
-`k8s.plan` 生成待执行的写计划；计划有效期为两分钟且只能成功提交一次。
-`k8s.commit` 必须带同一计划和同一授权身份。过期、重复、身份不匹配或内容
-改变时拒绝提交并要求重新 plan。内存中的待提交计划同时受 1024 条、64 MiB
-全局预算和通常 16 MiB 的单身份预算约束；单个较大计划最多只保留一个。客户端
-不应缓存或重放计划，也不应批量堆积未提交计划。
+`k8s.plan` 生成待执行的写计划，并返回预览、高熵 `planId` 和 6 位确认码。模型必须
+向人类展示预览和确认码，停止写工具调用，等待人类在后续用户消息中复述该码。
+`k8s.commit` 必须在两分钟内使用同一授权身份同时提交 planId 和确认码。缺失确认码
+返回 `confirmation_required`；格式错误或不匹配返回 `invalid_confirmation`。缺失和
+格式错误不计入尝试次数；每次格式正确但不匹配会计数，第 5 次会删除计划并返回
+`confirmation_locked`。正确确认会在策略、RBAC、generation、UID、resourceVersion 和实际
+执行复检前原子消费计划，因此之后任何失败都必须重新 plan。过期、重复、身份不匹配
+或内容改变同样会被拒绝。内存计划仍受 1024 条、全局 64 MiB 和通常单身份 16 MiB
+预算限制。
+
+模型本身能够看到确认码，因此 Server 无法证明 `k8s.commit` 中的码确实由人类提供。
+这是依赖模型遵从的防误执行约束，不是密码学意义上的人工审批，也不能抵抗恶意模型
+或 Prompt Injection。需要强制职责分离时，必须使用外部审批网关或带外审批系统。
 
 Kubernetes Role 使用 `resourceNames` 限制对象时，调用 `k8s.search` 必须同时传入
 目标 `name`；Server 会用该名称执行 SelfSubjectAccessReview，避免把本来允许的
@@ -138,7 +146,7 @@ MCP 客户端配置或 issue。
 - Server 为认证和每次通过 MCP 参数校验的工具调用输出 `audit_schema=v1` 的结构化
   JSON 审计
   事件，包含 Kubernetes 用户/UID 的稳定标识、工具、API 目标、决策、稳定原因和
-  延迟。审计事件不记录 Bearer Token、计划 ID、资源对象、patch、exec 命令、
+  延迟。审计事件不记录 Bearer Token、planId、确认码、资源对象、patch、exec 命令、
   stdin、日志内容或工具响应。
 - 为不同团队/自动化任务使用不同 ServiceAccount，设置短过期时间并定期轮换；
   删除或禁用身份后，TokenReview/RBAC 应立即阻止后续请求。
@@ -234,7 +242,7 @@ Deployment 和 NetworkPolicy 的 informer 只 watch 带 Operator 管理标签的
 - [ ] `ca.crt` 以只读配置分发，TLS 校验不关闭；token 在 Secret 管理器中轮换。
 - [ ] NetworkPolicy 只放行受控入站来源；另行验证 Server 到 kube-apiserver/DNS 的
       Egress 连通性，入口不记录凭据。
-- [ ] 监控 TokenReview 失败、403、plan/commit 失败、exec 超限和证书轮换事件。
+- [ ] 监控 TokenReview 失败、403、确认码错误/锁定、plan/commit 失败、exec 超限和证书轮换事件。
 - [ ] 收集 `audit_schema=v1` 日志并限制访问；启用可选 PrometheusRule 后根据业务
       基线调整认证失败、授权拒绝、限流和工具错误阈值。
 - [ ] 卸载 CRD 或删除 Dangerous CR 前，先导出配置和审计记录并确认影响范围。
@@ -250,7 +258,7 @@ Deployment 和 NetworkPolicy 的 informer 只 watch 带 Operator 管理标签的
 - **TLS 错误**：核对 `status.caConfigMapName`、CA 内容、证书密钥匹配、信任链、
   ServerAuth、SAN/有效期和客户端 ServerName；BYO Secret 任一校验失败都会使
   `TLSReady=False`，不要使用 `-k`。
-- **plan/commit 失败**：计划是否超过两分钟、已被提交或身份已变；重新 plan，
-  不要重放旧计划。
+- **plan/commit 失败**：检查确认码是否为人类复述的 6 位数字、是否已因 5 次错误
+  被锁定，以及计划是否超过两分钟、已被提交或身份已变；重新 plan，不要重放旧计划。
 - **exec/attach 失败**：确认 Dangerous、目标资源合法、非交互、超时/字节/并发
   预算未超限；TTY 和 port-forward 等未实现功能不会通过配置启用。
