@@ -1,6 +1,7 @@
 package server
 
 import (
+	"strings"
 	"testing"
 
 	mcpv1alpha1 "github.com/samuelsupe/supek8smcp/api/v1alpha1"
@@ -84,5 +85,44 @@ func TestHelpRejectsUnknownExactTool(t *testing.T) {
 	_, err := manualTestApp(mcpv1alpha1.ModeReadOnly).help(HelpInput{Tool: "k8s.unknown"})
 	if got := policyReason(err); got != "invalid_input" {
 		t.Fatalf("help(unknown tool) reason = %q, want invalid_input (error: %v)", got, err)
+	}
+}
+
+func TestWriteManualRequiresLaterHumanConfirmation(t *testing.T) {
+	t.Parallel()
+
+	details, err := manualTestApp(mcpv1alpha1.ModeSafeWrite).help(HelpInput{Tool: toolPlan})
+	if err != nil {
+		t.Fatalf("help(k8s.plan) error = %v", err)
+	}
+	if details.Manual == nil {
+		t.Fatal("help(k8s.plan) returned no manual")
+	}
+	planManual := details.Manual
+	joinedPlanSteps := strings.ToLower(strings.Join(planManual.Steps, " "))
+	if !strings.Contains(joinedPlanSteps, "human") || !strings.Contains(joinedPlanSteps, "later") || !strings.Contains(joinedPlanSteps, "stop") {
+		t.Fatalf("k8s.plan manual steps = %q, want later-human handoff and stop instruction", joinedPlanSteps)
+	}
+
+	commitDetails, err := manualTestApp(mcpv1alpha1.ModeSafeWrite).help(HelpInput{Tool: toolCommit})
+	if err != nil {
+		t.Fatalf("help(k8s.commit) error = %v", err)
+	}
+	if commitDetails.Manual == nil {
+		t.Fatal("help(k8s.commit) returned no manual")
+	}
+	var confirmationRequired bool
+	for _, input := range commitDetails.Manual.Inputs {
+		if input.Name == "confirmationCode" {
+			confirmationRequired = input.Required
+			break
+		}
+	}
+	if !confirmationRequired {
+		t.Fatalf("k8s.commit manual inputs = %#v, want required confirmationCode", commitDetails.Manual.Inputs)
+	}
+	joinedCommitSteps := strings.ToLower(strings.Join(commitDetails.Manual.Steps, " "))
+	if !strings.Contains(joinedCommitSteps, "later") || !strings.Contains(joinedCommitSteps, "human") {
+		t.Fatalf("k8s.commit manual steps = %q, want later-human confirmation handoff", joinedCommitSteps)
 	}
 }

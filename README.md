@@ -12,16 +12,16 @@ Turn a namespaced custom resource into a single-replica, HTTPS Streamable HTTP M
 [![GHCR](https://img.shields.io/badge/GHCR-container-2496ED?logo=docker&logoColor=white)](https://github.com/samuelsupe/supek8smcp/pkgs/container/supek8smcp)
 [![Go](https://img.shields.io/badge/go-1.25.12-00ADD8?logo=go&logoColor=white)](go.mod)
 
-## v0.1.1 downloads
+## v0.2.0 downloads
 
-- [Linux x64 (amd64) archive](https://github.com/SamuelSupe/supek8smcp/releases/download/v0.1.1/supek8smcp_0.1.1_linux_amd64.tar.gz)
-- [Linux ARM64 archive](https://github.com/SamuelSupe/supek8smcp/releases/download/v0.1.1/supek8smcp_0.1.1_linux_arm64.tar.gz)
-- [SHA-256 checksums](https://github.com/SamuelSupe/supek8smcp/releases/download/v0.1.1/checksums.txt)
+- [Linux x64 (amd64) archive](https://github.com/SamuelSupe/supek8smcp/releases/download/v0.2.0/supek8smcp_0.2.0_linux_amd64.tar.gz)
+- [Linux ARM64 archive](https://github.com/SamuelSupe/supek8smcp/releases/download/v0.2.0/supek8smcp_0.2.0_linux_arm64.tar.gz)
+- [SHA-256 checksums](https://github.com/SamuelSupe/supek8smcp/releases/download/v0.2.0/checksums.txt)
 
 Install or upgrade the Operator chart directly from the GitHub Release:
 
 ```bash
-helm upgrade --install supek8smcp https://github.com/SamuelSupe/supek8smcp/releases/download/v0.1.1/supek8smcp-0.1.1.tgz \
+helm upgrade --install supek8smcp https://github.com/SamuelSupe/supek8smcp/releases/download/v0.2.0/supek8smcp-0.2.0.tgz \
   --namespace supek8smcp-system --create-namespace
 ```
 
@@ -39,16 +39,19 @@ helm upgrade --install supek8smcp https://github.com/SamuelSupe/supek8smcp/relea
 | Mode | Available tools | Guardrails |
 | --- | --- | --- |
 | `ReadOnly` | `k8s.help`, `k8s.search`, `k8s.describe`, `k8s.read` | Reads only; pod logs require one-shot `follow=false`; no writes, exec, or attach. |
-| `SafeWrite` | Read-only tools plus `k8s.plan`, `k8s.commit` | Every persistent write is planned, expires after two minutes, and can be committed once; logs remain one-shot. |
-| `Dangerous` | SafeWrite plus streaming logs and bounded non-interactive `exec`/`attach` | `streamTimeout`, `execTimeout`, byte, list, and concurrency limits still apply; no TTY. |
+| `SafeWrite` | Read-only tools plus `k8s.plan`, `k8s.commit` | Every write requires a two-minute one-time plan and the six-digit code repeated by a human in a later user message; logs remain one-shot. |
+| `Dangerous` | SafeWrite plus streaming logs and bounded non-interactive `exec`/`attach` | The same human-code commit gate applies; `streamTimeout`, `execTimeout`, byte, list, and concurrency limits remain; no TTY. |
 
 CR `scope` and `policy` define an upper bound. The request Bearer token's Kubernetes RBAC is always checked as a second, independent boundary; effective permission is the intersection.
+
+The confirmation code is visible to the model. It enforces a two-turn, human-in-the-loop convention for compliant clients, but it cannot prove who supplied the code or resist a malicious model/prompt injection. Use an external approval gateway when verified separation of duties is required.
 
 ## Progressive MCP workflow
 
 ```mermaid
 sequenceDiagram
     participant C as MCP client
+    participant H as Human
     participant S as supek8smcp Server
     participant K as kube-apiserver
     C->>S: k8s.help (compact index)
@@ -59,8 +62,12 @@ sequenceDiagram
     C->>S: k8s.describe / k8s.read
     S->>K: same caller token, bounded request
     S-->>C: bounded result + audit event
-    C->>S: k8s.plan -> k8s.commit (SafeWrite/Dangerous)
-    S->>K: dry-run, then one authorized write
+    C->>S: k8s.plan (SafeWrite/Dangerous)
+    S-->>C: preview + planId + six-digit code
+    C-->>H: show preview and request code
+    H-->>C: repeat code in a later message
+    C->>S: k8s.commit (planId + code)
+    S->>K: recheck, then one authorized write
 ```
 
 `k8s.help` is local static data, but requests still pass authentication, rate limiting, and audit. `k8s.describe` locates an exact `fieldPath` before expanding `$ref` schemas and caps one expansion at 10,000 nodes. List calls page at most eight upstream objects and preserve Kubernetes `continue` tokens. Non-watch delegated, discovery, and OpenAPI responses are capped at 8 MiB.
@@ -83,7 +90,7 @@ Create a dedicated endpoint namespace first. Anyone who can create a Pod there m
 
 ```bash
 make install
-make deploy IMG=ghcr.io/your-org/supek8smcp:0.1.1
+make deploy IMG=ghcr.io/your-org/supek8smcp:0.2.0
 kubectl create namespace supek8smcp-servers
 ```
 
@@ -123,7 +130,7 @@ Use `status.endpoint` and the CA from `status.caConfigMapName`; send a short-liv
 Build and publish an immutable image, then install the CRD and Operator:
 
 ```bash
-export IMG=registry.example.com/platform/supek8smcp:0.1.1
+export IMG=registry.example.com/platform/supek8smcp:0.2.0
 make docker-build IMG="$IMG"
 docker push "$IMG"
 make install
@@ -134,7 +141,7 @@ make deploy IMG="$IMG"
 
 ## Observability and security
 
-The Server writes `audit_schema=v1` JSON events without tokens, plans, resource bodies, patches, commands, stdin, logs, or responses. Metrics are available on `:9090/metrics`, including authentication attempts, rate-limit rejections, audit events, tool results, and tool duration. Optional Prometheus resources live under [`config/monitoring`](config/monitoring).
+The Server writes `audit_schema=v1` JSON events without tokens, plan IDs, confirmation codes, resource bodies, patches, commands, stdin, logs, or responses. Metrics are available on `:9090/metrics`, including authentication attempts, rate-limit rejections, audit events, tool results, and tool duration. Optional Prometheus resources live under [`config/monitoring`](config/monitoring).
 
 Read the [security model](docs/security.md) before enabling `SafeWrite` or `Dangerous`. It documents namespace trust, TokenReview/RBAC, Origin rejection, self-protection of operator-managed resources, SafeWrite payload checks, plan budgets, TLS rotation, NetworkPolicy, and incident handling.
 
@@ -145,7 +152,7 @@ make fmt
 make vet
 make test
 make build
-make docker-build IMG=ghcr.io/your-org/supek8smcp:0.1.1
+make docker-build IMG=ghcr.io/your-org/supek8smcp:0.2.0
 ```
 
 Use `make manifests` when API types change; review generated YAML rather than editing it by hand. Release images should use immutable tags or digests and be published through the repository's release automation. See [`CHANGELOG.md`](CHANGELOG.md), [`CONTRIBUTING.md`](CONTRIBUTING.md), and [`SECURITY.md`](SECURITY.md) before opening a change or reporting a vulnerability.

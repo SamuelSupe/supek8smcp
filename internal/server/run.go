@@ -3,12 +3,14 @@ package server
 import (
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"time"
 
+	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -224,7 +226,7 @@ func (a *App) newMCPServer(principal *Principal) *mcp.Server {
 		destructive := false
 		mcp.AddTool(server, &mcp.Tool{
 			Name: toolPlan, Title: "Plan Kubernetes change",
-			Description: "Authorize and server-side dry-run a write or prepare a bounded remote execution. Returns a two-minute one-time plan ID; it never persists the requested change.",
+			Description: "Authorize and preview a write without persisting it. Returns a one-time plan and six-digit code; stop and wait until a human repeats the code in a later user message.",
 			Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, DestructiveHint: &destructive, OpenWorldHint: &readOnly},
 		}, func(ctx context.Context, _ *mcp.CallToolRequest, input PlanInput) (*mcp.CallToolResult, PlanOutput, error) {
 			started := time.Now()
@@ -237,20 +239,85 @@ func (a *App) newMCPServer(principal *Principal) *mcp.Server {
 			return nil, output, err
 		})
 		destructive = true
-		mcp.AddTool(server, &mcp.Tool{
+		commitInputSchema, err := newCommitInputSchema()
+		if err != nil {
+			panic(fmt.Sprintf("build k8s.commit input schema: %v", err))
+		}
+		commitOutputSchema, err := jsonschema.For[CommitOutput](nil)
+		if err != nil {
+			panic(fmt.Sprintf("build k8s.commit output schema: %v", err))
+		}
+		server.AddTool(&mcp.Tool{
 			Name: toolCommit, Title: "Commit Kubernetes change",
-			Description: "Consume an unexpired one-time plan after rechecking policy, Kubernetes RBAC, identity, and resource preconditions.",
+			Description: "Execute an unexpired one-time plan only after a human has repeated its six-digit confirmation code; policy, RBAC, identity, and resource preconditions are rechecked.",
 			Annotations: &mcp.ToolAnnotations{ReadOnlyHint: false, DestructiveHint: &destructive, IdempotentHint: false, OpenWorldHint: &readOnly},
-		}, func(ctx context.Context, request *mcp.CallToolRequest, input CommitInput) (*mcp.CallToolResult, CommitOutput, error) {
+			InputSchema: commitInputSchema, OutputSchema: commitOutputSchema,
+		}, func(ctx context.Context, request *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			started := time.Now()
+			input, err := decodeCommitInput(request.Params.Arguments)
+			if err != nil {
+				a.recordTool(principal, toolCommit, auditTarget{}, started, err)
+				result := &mcp.CallToolResult{}
+				result.SetError(err)
+				return result, nil
+			}
 			output, err := a.commit(ctx, request, principal, input)
 			target := auditTargetFromSummary(output.Operation)
 			target.Streaming = target.Action == "exec" || target.Action == "attach"
 			a.recordTool(principal, toolCommit, target, started, err)
-			return nil, output, err
+			result := &mcp.CallToolResult{}
+			if err != nil {
+				result.SetError(err)
+				return result, nil
+			}
+			encoded, err := json.Marshal(output)
+			if err != nil {
+				return nil, fmt.Errorf("marshal k8s.commit output: %w", err)
+			}
+			result.StructuredContent = json.RawMessage(encoded)
+			result.Content = []mcp.Content{&mcp.TextContent{Text: string(encoded)}}
+			return result, nil
 		})
 	}
 	return server
+}
+
+func decodeCommitInput(arguments json.RawMessage) (CommitInput, error) {
+	var input CommitInput
+	if len(arguments) == 0 {
+		return input, nil
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(arguments, &fields); err != nil {
+		return input, policyError("invalid_input", "k8s.commit arguments must match the published schema")
+	}
+	if err := json.Unmarshal(arguments, &input); err != nil {
+		var typeError *json.UnmarshalTypeError
+		if errors.As(err, &typeError) && typeError.Field == "confirmationCode" {
+			return input, policyError("invalid_confirmation", "confirmation code must be exactly six digits")
+		}
+		return input, policyError("invalid_input", "k8s.commit arguments must match the published schema")
+	}
+	if rawCode, present := fields["confirmationCode"]; present {
+		var code string
+		if err := json.Unmarshal(rawCode, &code); err != nil || !validConfirmationCode(code) {
+			return input, policyError("invalid_confirmation", "confirmation code must be exactly six digits")
+		}
+	}
+	return input, nil
+}
+
+func newCommitInputSchema() (*jsonschema.Schema, error) {
+	schema, err := jsonschema.For[CommitInput](nil)
+	if err != nil {
+		return nil, err
+	}
+	confirmation, ok := schema.Properties["confirmationCode"]
+	if !ok {
+		return nil, errors.New("confirmationCode property is missing")
+	}
+	confirmation.Pattern = confirmationCodePattern
+	return schema, nil
 }
 
 func (a *App) defaultNamespace(capability Capability, namespace string) string {

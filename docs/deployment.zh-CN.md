@@ -16,9 +16,9 @@ MCP 客户端通过 HTTPS Streamable HTTP 访问它。示例假设使用 `kubect
   `tokenreviews.create`，也不会代持客户端 Bearer Token。Operator 会校验固定角色
   不是聚合角色且不含任何额外规则；角色缺失、不可校验、被扩权，或已有绑定
   指向其他角色时会撤掉异常绑定并报告 `AuthReady=False`。
-- 默认的 v0.1.1 镜像 `ghcr.io/samuelsupe/supek8smcp:0.1.1` 是公开的。Operator 命名空间
+- 默认的 v0.2.0 镜像 `ghcr.io/samuelsupe/supek8smcp:0.2.0` 是公开的。Operator 命名空间
   以及每个 KMCP 端点命名空间中的 Pod 都必须能够拉取同一个镜像。若使用私有镜像，
-  v0.1.1 chart 不会向生成的 Server Pod 分发或复制 registry 凭据；请通过节点运行时凭据
+  v0.2.0 chart 不会向生成的 Server Pod 分发或复制 registry 凭据；请通过节点运行时凭据
   或其他集群机制，确保 Operator Pod 与所有生成的 Server Pod 都能拉取该镜像。
 - MCP 客户端支持 Streamable HTTP、Bearer header 和自定义 CA。
 
@@ -27,7 +27,7 @@ MCP 客户端通过 HTTPS Streamable HTTP 访问它。示例假设使用 `kubect
 从源码构建并发布镜像：
 
 ```bash
-export IMG=registry.example.com/platform/supek8smcp:0.1.1
+export IMG=registry.example.com/platform/supek8smcp:0.2.0
 make docker-build IMG="$IMG"
 docker push "$IMG"
 ```
@@ -69,27 +69,31 @@ Operator 命名空间取 `POD_NAMESPACE`，未设置时为 `supek8smcp-system`�
 
 ## 使用 Helm 安装
 
-v0.1.1 chart 发布在 GitHub Release。首次安装或升级已有 release 都使用同一条命令：
+v0.2.0 chart 发布在 GitHub Release。首次安装或升级已有 release 都使用同一条命令：
 
 ```bash
 helm upgrade --install supek8smcp \
-  https://github.com/SamuelSupe/supek8smcp/releases/download/v0.1.1/supek8smcp-0.1.1.tgz \
+  https://github.com/SamuelSupe/supek8smcp/releases/download/v0.2.0/supek8smcp-0.2.0.tgz \
   --namespace supek8smcp-system --create-namespace
 kubectl -n supek8smcp-system rollout status deploy/supek8smcp
 kubectl -n supek8smcp-system get deploy,pods
 ```
 
-chart 默认将 `image.tag` 设为 `appVersion`，因此 v0.1.1 会拉取
-`ghcr.io/samuelsupe/supek8smcp:0.1.1`。该镜像发布为 Linux amd64/arm64 多架构
+chart 默认将 `image.tag` 设为 `appVersion`，因此 v0.2.0 会拉取
+`ghcr.io/samuelsupe/supek8smcp:0.2.0`。该镜像发布为 Linux amd64/arm64 多架构
 manifest，节点运行时会自动选择匹配的架构。只有使用另行发布的镜像时才需要覆盖
 `image.repository`、`image.tag` 或 `image.digest`。
+
+v0.2.0 修改了写工具契约：SafeWrite/Dangerous 的每次 `k8s.commit` 都必须携带
+`k8s.plan` 返回、并由人类复述的 `confirmationCode`。部署 v0.2.0 Server 镜像前应先
+升级 MCP 客户端；仅包含 `planId` 的 v0.1.x commit 请求会被拒绝。
 
 Helm 的 `crds/` 机制只会在首次 install 时创建 CRD，upgrade 不会升级 CRD。升级 chart
 版本前，应先从对应 release tag/raw URL 或已下载源码应用 CRD，再确认其状态为
 Established，之后才执行 Helm upgrade：
 
 ```bash
-kubectl apply -f https://raw.githubusercontent.com/SamuelSupe/supek8smcp/v0.1.1/config/crd/bases/mcp.supek8smcp.io_kubernetesmcpservers.yaml
+kubectl apply -f https://raw.githubusercontent.com/SamuelSupe/supek8smcp/v0.2.0/config/crd/bases/mcp.supek8smcp.io_kubernetesmcpservers.yaml
 kubectl wait --for=condition=Established --timeout=60s crd/kubernetesmcpservers.mcp.supek8smcp.io
 ```
 
@@ -398,12 +402,14 @@ TokenReview API 或委派客户端暂时不可用时 Server 返回 `503`，并�
 
 ### 写操作被拒绝或 commit 失败
 
-SafeWrite/Dangerous 的持久写必须先调用 `k8s.plan`，并在两分钟内使用同一
-身份调用 `k8s.commit`。计划是一次性的；过期、重复提交、token/请求上下文
-不一致都应重新 plan。ReadOnly 永远不会暴露写工具。SafeWrite 还会比较变更前对象
-与 kube-apiserver dry-run 的最终对象；如果父路径替换、`null` 或字段省略会移除
-已有的容器/Pod 安全约束，plan 会以 `unsafe_payload` 拒绝。需要有意放宽这些约束时，
-必须使用经过显式 policy 和 Kubernetes RBAC 授权的 Dangerous Server。
+SafeWrite/Dangerous 的写入必须先调用 `k8s.plan`，向人类展示预览和 6 位确认码，
+再等待人类在后续用户消息中复述该码。随后必须在两分钟内使用同一身份，同时携带
+`planId` 和 `confirmationCode` 调用 `k8s.commit`。缺失或格式错误的码会被拒绝；
+连续 5 次错误的 6 位码会使计划失效。计划是一次性的，正确确认后即使后续安全检查
+或 Kubernetes 请求失败也必须重新 plan；过期、重放、token/请求上下文不一致同样
+要求新计划。ReadOnly 永远不会暴露写工具。SafeWrite 仍会比较变更前对象和
+kube-apiserver dry-run 最终对象并拒绝不安全的约束移除。由于模型本身能看到确认码，
+需要可验证的人工审批时必须使用外部审批网关。
 
 ### exec/attach 失败
 

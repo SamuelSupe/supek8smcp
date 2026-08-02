@@ -66,13 +66,12 @@ func TestCapabilityCodecRoundTripAndTamperRejection(t *testing.T) {
 		t.Fatalf("tampered resource decode error = %v, want invalid_capability", err)
 	}
 
-	mutatedSignature := parts[1]
-	last := mutatedSignature[len(mutatedSignature)-1]
-	if last == 'A' {
-		mutatedSignature = mutatedSignature[:len(mutatedSignature)-1] + "B"
-	} else {
-		mutatedSignature = mutatedSignature[:len(mutatedSignature)-1] + "A"
+	signatureBytes, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		t.Fatalf("decode signature: %v", err)
 	}
+	signatureBytes[0] ^= 1
+	mutatedSignature := base64.RawURLEncoding.EncodeToString(signatureBytes)
 	if _, err := codec.decode(parts[0] + "." + mutatedSignature); policyReason(err) != "invalid_capability" {
 		t.Fatalf("tampered signature decode error = %v, want invalid_capability", err)
 	}

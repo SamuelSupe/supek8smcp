@@ -26,12 +26,14 @@ CR rules therefore describe “at most what is allowed”, not an additional gra
 | Mode | Tools | Main boundary |
 | --- | --- | --- |
 | `ReadOnly` | `k8s.help`, `k8s.search`, `k8s.describe`, `k8s.read` | The handbook is static; resources are read-only, Pod logs require one-shot `follow=false`, and persistent writes/exec/attach are unavailable. |
-| `SafeWrite` | Read-only tools plus `k8s.plan`, `k8s.commit` | Logs remain `follow=false`; every persistent write requires plan, then one commit within two minutes. |
-| `Dangerous` | All SafeWrite tools plus `follow=true` logs and bounded non-interactive exec/attach | Streams use `streamTimeout`/`maxOutputBytes`; exec/attach use `execTimeout`/`maxOutputBytes` and other limits; no TTY. |
+| `SafeWrite` | Read-only tools plus `k8s.plan`, `k8s.commit` | Logs remain `follow=false`; every write requires a plan and a six-digit code repeated by a human in a later user message. |
+| `Dangerous` | All SafeWrite tools plus `follow=true` logs and bounded non-interactive exec/attach | The same human-code gate applies; streams and remote execution remain bounded; no TTY. |
 
 `k8s.help` is exposed in all modes. With no arguments it returns only a tool index and mode-specific `available` state; a second call using the index's `detailsRequest` loads one tool's full usage. ReadOnly can inspect write-tool documentation, but `k8s.plan`/`k8s.commit` are marked unavailable and are not exposed by that Server. The handbook is local static data and does not run discovery, reads, or writes, but the request still requires TokenReview, identity rate limiting, and `audit_schema=v1` auditing.
 
-`k8s.plan` creates a pending write plan. It is valid for two minutes and succeeds once only. `k8s.commit` must present the same plan and authorized identity. Expired, replayed, identity-mismatched, or changed content is rejected and requires a new plan. In-memory pending plans are bounded by 1,024 entries and 64 MiB globally, usually 16 MiB per identity; one oversized plan may be retained. Clients must not cache or replay plans or accumulate uncommitted plans.
+`k8s.plan` creates a pending write plan and returns its preview, a high-entropy `planId`, and a six-digit confirmation code. The model must show the preview and code to a human, stop write-tool calls, and wait for the human to repeat that code in a later user message. `k8s.commit` requires both values with the same authorized identity within two minutes. A missing code returns `confirmation_required`; a malformed or nonmatching code returns `invalid_confirmation`. Missing and malformed values do not count as attempts. Each well-formed mismatch does, and the fifth deletes the plan and returns `confirmation_locked`. Correct confirmation atomically consumes the plan before policy, RBAC, generation, UID, resourceVersion, and execution checks, so any later failure requires a new plan. Expired, replayed, identity-mismatched, or changed plans are also rejected. Pending plans remain bounded by 1,024 entries and 64 MiB globally, usually 16 MiB per identity.
+
+The model receives the confirmation code, so the Server cannot prove that a human, rather than the model, supplied it to `k8s.commit`. This is a model-compliance guard against accidental execution, not cryptographic human approval and not protection against a malicious model or prompt injection. Use an external approval gateway or out-of-band approver when separation of duties must be enforced.
 
 When a Kubernetes Role uses `resourceNames`, `k8s.search` must receive the target `name`. The Server includes that name in SelfSubjectAccessReview so named permissions are not misclassified. Each page performs at most 100 SelfSubjectAccessReviews; sparse authorization can yield fewer results than requested, so clients must continue with `nextCursor` instead of amplifying one tool call against kube-apiserver.
 
@@ -64,7 +66,7 @@ The default `spec.policy.sensitiveReads` value is `Redact`: Secret data and all 
 - Use HTTPS and verify both the CA and server name. Operator-managed CA/leaf certificates are published through `status.caConfigMapName`; a `kubernetes.io/tls` Secret may be referenced instead.
 - Put tokens only in the `Authorization` header. Proxies, log collectors, and tracing exporters must explicitly exclude that header; query-string tokens are forbidden.
 - TokenReview and subsequent kube-apiserver calls use the same token, so Kubernetes audit sees the real subject. The Server must not substitute a high-privilege Operator identity.
-- The Server emits structured `audit_schema=v1` JSON for authentication and every MCP tool call that passes parameter validation. It contains stable Kubernetes user/UID identifiers, tool, API target, decision, stable reason, and latency; it never contains Bearer tokens, plan IDs, objects, patches, exec commands, stdin, log content, or tool responses.
+- The Server emits structured `audit_schema=v1` JSON for authentication and every MCP tool call that passes parameter validation. It contains stable Kubernetes user/UID identifiers, tool, API target, decision, stable reason, and latency; it never contains Bearer tokens, plan IDs, confirmation codes, objects, patches, exec commands, stdin, log content, or tool responses.
 - Use different ServiceAccounts for teams and automation, set short expirations, and rotate regularly. Removing or disabling an identity should immediately block later requests through TokenReview/RBAC.
 - Monitor CR status, Operator/Server logs, Kubernetes audit, and NetworkPolicy events. Keep only necessary subject, request class, result, and latency; do not retain credentials or complete resource contents.
 
@@ -101,7 +103,7 @@ If a diagnostic bundle must be exported, first redact YAML, Secrets, tokens, hea
 - [ ] Keep `Redact` by default; enable `Allow` or `Dangerous` only with approval, a short window, and audit.
 - [ ] Distribute `ca.crt` read-only, never disable TLS checks, and rotate tokens through a Secret manager.
 - [ ] Allow only controlled ingress in NetworkPolicy; separately verify kube-apiserver/DNS Egress and ensure the gateway does not log credentials.
-- [ ] Monitor TokenReview failures, 403s, plan/commit failures, exec limits, and certificate rotation.
+- [ ] Monitor TokenReview failures, 403s, invalid/locked confirmations, plan/commit failures, exec limits, and certificate rotation.
 - [ ] Collect `audit_schema=v1` with restricted access; if installing the optional PrometheusRule, tune authentication-failure, authorization-denial, rate-limit, and tool-error thresholds to the baseline.
 - [ ] Before CRD removal or deleting a Dangerous CR, export configuration and audit records and confirm the impact.
 
@@ -110,5 +112,5 @@ If a diagnostic bundle must be exported, first redact YAML, Secrets, tokens, hea
 - **401:** Check the Bearer header and token expiry/validity; do not “fix” it by substituting an Operator token. **503** means TokenReview/delegated-client unavailability or waiting for `maxConcurrent` beyond `requestTimeout`; use the audit reason to check kube-apiserver connectivity, Server ServiceAccount permissions, and concurrency.
 - **403:** Run `kubectl auth can-i` as the same ServiceAccount, then inspect CR scope, policy, and mode. Permission is an intersection, so either side can deny it.
 - **TLS error:** Verify `status.caConfigMapName`, CA contents, key matching, trust chain, ServerAuth, SAN/validity, and client ServerName. Any BYO Secret validation failure sets `TLSReady=False`; do not use `-k`.
-- **Plan/commit failure:** Check the two-minute expiry, one-shot state, and identity; create a new plan rather than replaying it.
+- **Plan/commit failure:** Check the six-digit format, human-repeated code, five-attempt lockout, two-minute expiry, one-shot state, and identity; create a new plan rather than replaying it.
 - **Exec/attach failure:** Confirm Dangerous mode, a valid target, non-interactive input, and timeout/byte/concurrency budgets. TTY and port-forward cannot be enabled by configuration.

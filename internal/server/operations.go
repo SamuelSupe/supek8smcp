@@ -32,12 +32,21 @@ type PlanInput struct {
 }
 
 type PlanOutput struct {
-	PlanID    string         `json:"planId"`
-	ExpiresAt string         `json:"expiresAt"`
-	Operation map[string]any `json:"operation"`
-	Preview   any            `json:"preview,omitempty"`
-	Warnings  []string       `json:"warnings,omitempty"`
+	PlanID       string                `json:"planId"`
+	ExpiresAt    string                `json:"expiresAt"`
+	Operation    map[string]any        `json:"operation"`
+	Preview      any                   `json:"preview,omitempty"`
+	Warnings     []string              `json:"warnings,omitempty"`
+	Confirmation ConfirmationChallenge `json:"confirmation"`
 }
+
+type ConfirmationChallenge struct {
+	Required    bool   `json:"required"`
+	Code        string `json:"code"`
+	Instruction string `json:"instruction"`
+}
+
+const humanConfirmationInstruction = "Show the operation preview and this code to the human. Do not call k8s.commit until the human repeats the code in a later user message."
 
 func (a *App) plan(ctx context.Context, principal *Principal, input PlanInput) (PlanOutput, error) {
 	ctx, cancel := a.requestContext(ctx)
@@ -80,18 +89,20 @@ func (a *App) plan(ctx context.Context, principal *Principal, input PlanInput) (
 	if err != nil {
 		return PlanOutput{}, err
 	}
-	id, expires, err := a.plans.Create(principal.SubjectKey(), operation)
+	id, confirmationCode, expires, err := a.plans.Create(principal.SubjectKey(), operation)
 	if err != nil {
 		return PlanOutput{}, err
 	}
 	return PlanOutput{
 		PlanID: id, ExpiresAt: expires.UTC().Format(time.RFC3339),
 		Operation: operationSummary(operation), Preview: boundedValue(preview, a.config.Spec.Limits.MaxOutputBytes/2), Warnings: warnings,
+		Confirmation: ConfirmationChallenge{Required: true, Code: confirmationCode, Instruction: humanConfirmationInstruction},
 	}, nil
 }
 
 type CommitInput struct {
-	PlanID string `json:"planId" jsonschema:"unexpired one-time plan ID returned by k8s.plan"`
+	PlanID           string `json:"planId" jsonschema:"unexpired one-time plan ID returned by k8s.plan"`
+	ConfirmationCode string `json:"confirmationCode" jsonschema:"six-digit code repeated by a human after reviewing the k8s.plan response"`
 }
 
 type CommitOutput struct {
@@ -100,7 +111,7 @@ type CommitOutput struct {
 }
 
 func (a *App) commit(ctx context.Context, request *mcp.CallToolRequest, principal *Principal, input CommitInput) (CommitOutput, error) {
-	operation, err := a.plans.Consume(input.PlanID, principal.SubjectKey())
+	operation, err := a.plans.Consume(input.PlanID, principal.SubjectKey(), input.ConfirmationCode)
 	if err != nil {
 		return CommitOutput{}, err
 	}

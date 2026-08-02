@@ -166,13 +166,15 @@ var toolManuals = []ToolManual{
 		Steps: []string{
 			"Search for the exact write capability and inspect its schema when constructing an object.",
 			"Call plan once and review operation, preview, and warnings.",
-			"Pass the returned planId to k8s.commit within two minutes using the same Kubernetes identity.",
+			"Show the preview and confirmation code to the human, then stop all write-tool calls.",
+			"Wait until the human repeats the code in a later user message; never copy the code from this tool response directly into k8s.commit.",
 		},
-		Returns: []string{"A one-time planId, expiry, safe operation summary, bounded preview, and warnings."},
+		Returns: []string{"A one-time planId, expiry, safe operation summary, bounded preview, warnings, and a six-digit human confirmation challenge."},
 		Safety: []string{
 			"Plan does not persist the requested change; Kubernetes dry-run and policy checks still apply.",
 			"SafeWrite blocks dangerous actions and unsafe payloads; exec, attach, delete, force apply, and cluster writes require Dangerous mode and explicit policy scope.",
 			"Do not log, cache, share, or retry a planId as though it were idempotent.",
+			"The model can see the code, so this workflow depends on model compliance and is not cryptographic proof of human approval.",
 		},
 		Example: map[string]any{
 			"capabilityId": "<patch-capability-from-k8s.search>", "namespace": "platform", "name": "web",
@@ -183,18 +185,22 @@ var toolManuals = []ToolManual{
 		Name: toolCommit, Purpose: "Consume one unexpired plan and execute it after rechecking identity, policy, RBAC, and resource preconditions.", Modes: writeAccessModes,
 		Inputs: []ToolManualInput{
 			{Name: "planId", Required: true, Description: "One-time id returned by k8s.plan."},
+			{Name: "confirmationCode", Required: true, Description: "Exact six-digit code repeated by the human in a later user message."},
 		},
 		Steps: []string{
 			"Review the k8s.plan response before committing.",
-			"Commit once, within two minutes, with the same authenticated Kubernetes identity.",
+			"Do not call this tool until the human repeats the plan's code in a later user message.",
+			"Commit once, within two minutes, with that code and the same authenticated Kubernetes identity.",
 			"If commit is rejected or the target changed, search and create a new plan instead of replaying the old id.",
 		},
 		Returns: []string{"A safe operation summary and bounded execution result."},
 		Safety: []string{
 			"Commit can persist a mutation or run Dangerous exec/attach; treat it as the execution boundary.",
-			"Plans are one-time and identity-bound. Policy, RBAC, generation, UID, and resourceVersion preconditions are rechecked.",
+			"Plans and confirmation codes are one-time and identity-bound. Policy, RBAC, generation, UID, and resourceVersion preconditions are rechecked.",
+			"A missing code is rejected; malformed codes do not count as attempts, while five well-formed incorrect codes invalidate the plan.",
+			"Because the model receives the code, server-side verification cannot prove that a human supplied it; use an external approval gateway when strong separation of duties is required.",
 		},
-		Example: map[string]any{"planId": "<from-k8s.plan>"},
+		Example: map[string]any{"planId": "<from-k8s.plan>", "confirmationCode": "<repeated-by-human>"},
 	},
 }
 

@@ -60,7 +60,12 @@ type searchOutput struct {
 }
 
 type planOutput struct {
-	PlanID string `json:"planId"`
+	PlanID       string `json:"planId"`
+	Confirmation struct {
+		Required    bool   `json:"required"`
+		Code        string `json:"code"`
+		Instruction string `json:"instruction"`
+	} `json:"confirmation"`
 }
 
 type serverStatus struct {
@@ -272,6 +277,12 @@ func (h *harness) assertConfigMap(ctx context.Context, name, want string) {
 	}
 }
 
+func (h *harness) assertConfigMapAbsent(ctx context.Context, name string) {
+	if _, err := h.tryKubectl(ctx, "get", "configmap", name, "-n", h.namespace, "-o", "name"); err == nil {
+		h.t.Fatalf("ConfigMap %s exists after a rejected confirmation", name)
+	}
+}
+
 func (h *harness) waitServerReady(ctx context.Context, name string) serverStatus {
 	var last serverStatus
 	for {
@@ -351,6 +362,24 @@ func (h *harness) call(ctx context.Context, client *mcpClient, name string, argu
 	return result
 }
 
+func (h *harness) callExpectError(ctx context.Context, client *mcpClient, name string, arguments map[string]any) *mcp.CallToolResult {
+	result, err := client.session.CallTool(ctx, &mcp.CallToolParams{Name: name, Arguments: arguments})
+	if err != nil {
+		h.t.Fatalf("MCP tool %s failed at protocol level: %v", name, err)
+	}
+	if result == nil || !result.IsError {
+		h.t.Fatalf("MCP tool %s unexpectedly succeeded", name)
+	}
+	raw, err := json.Marshal(result)
+	if err != nil {
+		h.t.Fatalf("marshal MCP tool %s error result: %v", name, err)
+	}
+	if bytes.Contains(raw, []byte(client.token)) {
+		h.t.Fatalf("MCP tool %s echoed the bearer token in an error result", name)
+	}
+	return result
+}
+
 func (h *harness) decode(result *mcp.CallToolResult, target any) {
 	if result.StructuredContent == nil {
 		h.t.Fatal("MCP tool returned no structured content")
@@ -362,6 +391,29 @@ func (h *harness) decode(result *mcp.CallToolResult, target any) {
 	if err := json.Unmarshal(data, target); err != nil {
 		h.t.Fatalf("decode structured MCP result: %v", err)
 	}
+}
+
+func (h *harness) confirmationCommitArguments(planned planOutput) map[string]any {
+	if planned.PlanID == "" {
+		h.t.Fatal("k8s.plan returned no planId")
+	}
+	challenge := planned.Confirmation
+	if !challenge.Required {
+		h.t.Fatalf("k8s.plan confirmation.required = false, want true")
+	}
+	if len(challenge.Code) != 6 || challenge.Code[0] < '1' || challenge.Code[0] > '9' {
+		h.t.Fatalf("k8s.plan confirmation.code = %q, want a six-digit code in [100000,999999]", challenge.Code)
+	}
+	for _, character := range challenge.Code {
+		if character < '0' || character > '9' {
+			h.t.Fatalf("k8s.plan confirmation.code = %q, want decimal digits", challenge.Code)
+		}
+	}
+	instruction := strings.ToLower(challenge.Instruction)
+	if !strings.Contains(instruction, "human") || !strings.Contains(instruction, "later") {
+		h.t.Fatalf("k8s.plan confirmation.instruction = %q, want later human confirmation", challenge.Instruction)
+	}
+	return map[string]any{"planId": planned.PlanID, "confirmationCode": challenge.Code}
 }
 
 func (h *harness) apply(ctx context.Context, object map[string]any) {

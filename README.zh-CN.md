@@ -12,16 +12,16 @@
 [![GHCR](https://img.shields.io/badge/GHCR-container-2496ED?logo=docker&logoColor=white)](https://github.com/samuelsupe/supek8smcp/pkgs/container/supek8smcp)
 [![Go](https://img.shields.io/badge/go-1.25.12-00ADD8?logo=go&logoColor=white)](go.mod)
 
-## v0.1.1 下载
+## v0.2.0 下载
 
-- [Linux x64（amd64）压缩包](https://github.com/SamuelSupe/supek8smcp/releases/download/v0.1.1/supek8smcp_0.1.1_linux_amd64.tar.gz)
-- [Linux ARM64 压缩包](https://github.com/SamuelSupe/supek8smcp/releases/download/v0.1.1/supek8smcp_0.1.1_linux_arm64.tar.gz)
-- [SHA-256 校验和](https://github.com/SamuelSupe/supek8smcp/releases/download/v0.1.1/checksums.txt)
+- [Linux x64（amd64）压缩包](https://github.com/SamuelSupe/supek8smcp/releases/download/v0.2.0/supek8smcp_0.2.0_linux_amd64.tar.gz)
+- [Linux ARM64 压缩包](https://github.com/SamuelSupe/supek8smcp/releases/download/v0.2.0/supek8smcp_0.2.0_linux_arm64.tar.gz)
+- [SHA-256 校验和](https://github.com/SamuelSupe/supek8smcp/releases/download/v0.2.0/checksums.txt)
 
 直接从 GitHub Release 安装或升级 Operator chart：
 
 ```bash
-helm upgrade --install supek8smcp https://github.com/SamuelSupe/supek8smcp/releases/download/v0.1.1/supek8smcp-0.1.1.tgz \
+helm upgrade --install supek8smcp https://github.com/SamuelSupe/supek8smcp/releases/download/v0.2.0/supek8smcp-0.2.0.tgz \
   --namespace supek8smcp-system --create-namespace
 ```
 
@@ -39,16 +39,19 @@ helm upgrade --install supek8smcp https://github.com/SamuelSupe/supek8smcp/relea
 | 模式 | 可用工具 | 保护边界 |
 | --- | --- | --- |
 | `ReadOnly` | `k8s.help`、`k8s.search`、`k8s.describe`、`k8s.read` | 只读；Pod 日志必须一次性 `follow=false`；不允许写入、exec 或 attach。 |
-| `SafeWrite` | 只读工具，以及 `k8s.plan`、`k8s.commit` | 所有持久写入都要先 plan，计划两分钟后过期且只能提交一次；日志仍为一次性读取。 |
-| `Dangerous` | SafeWrite 全部工具，以及持续日志和有界非交互 `exec`/`attach` | 仍受 `streamTimeout`、`execTimeout`、字节、列表和并发限制；不提供 TTY。 |
+| `SafeWrite` | 只读工具，以及 `k8s.plan`、`k8s.commit` | 每次写入都需要两分钟有效的一次性计划，以及人类在后续用户消息中复述的 6 位确认码；日志仍为一次性读取。 |
+| `Dangerous` | SafeWrite 全部工具，以及持续日志和有界非交互 `exec`/`attach` | 同样强制人工确认码；仍受 `streamTimeout`、`execTimeout`、字节、列表和并发限制；不提供 TTY。 |
 
 CR 的 `scope` 和 `policy` 是能力上限。请求 Bearer Token 的 Kubernetes RBAC 始终作为第二层独立边界检查；最终权限是两者交集。
+
+确认码对模型可见，因此它约束的是遵从协议的客户端必须经过两轮人机确认，不能证明确认码确实来自人类，也不能抵抗恶意模型或 Prompt Injection。需要可验证的职责分离时，应使用外部审批网关。
 
 ## 渐进式 MCP 流程
 
 ```mermaid
 sequenceDiagram
     participant C as MCP 客户端
+    participant H as 人类
     participant S as supek8smcp Server
     participant K as kube-apiserver
     C->>S: k8s.help（紧凑索引）
@@ -59,8 +62,12 @@ sequenceDiagram
     C->>S: k8s.describe / k8s.read
     S->>K: 使用同一调用者 Token 的有界请求
     S-->>C: 有界结果和审计事件
-    C->>S: k8s.plan -> k8s.commit（SafeWrite/Dangerous）
-    S->>K: dry-run，再执行一次授权写入
+    C->>S: k8s.plan（SafeWrite/Dangerous）
+    S-->>C: 预览 + planId + 6 位确认码
+    C-->>H: 展示预览并请求确认码
+    H-->>C: 在后续消息中复述确认码
+    C->>S: k8s.commit（planId + 确认码）
+    S->>K: 复检后执行一次授权写入
 ```
 
 `k8s.help` 使用本地静态数据，但请求仍需通过认证、限流和审计。`k8s.describe` 会先定位精确 `fieldPath`，再展开 `$ref` schema，单次展开最多 10,000 个节点。列表请求每次最多向上游读取 8 个对象并保留 Kubernetes `continue` token。非 watch 的委派、discovery 和 OpenAPI 响应上限为 8 MiB。
@@ -83,7 +90,7 @@ flowchart LR
 
 ```bash
 make install
-make deploy IMG=ghcr.io/your-org/supek8smcp:0.1.1
+make deploy IMG=ghcr.io/your-org/supek8smcp:0.2.0
 kubectl create namespace supek8smcp-servers
 ```
 
@@ -123,7 +130,7 @@ kubectl -n supek8smcp-servers get svc -l app.kubernetes.io/instance=team-readonl
 构建并发布不可变镜像，然后安装 CRD 和 Operator：
 
 ```bash
-export IMG=registry.example.com/platform/supek8smcp:0.1.1
+export IMG=registry.example.com/platform/supek8smcp:0.2.0
 make docker-build IMG="$IMG"
 docker push "$IMG"
 make install
@@ -134,7 +141,7 @@ make deploy IMG="$IMG"
 
 ## 可观测性与安全
 
-Server 输出 `audit_schema=v1` JSON 事件，但不包含 Token、计划、资源正文、patch、命令、stdin、日志或响应。`:9090/metrics` 提供认证尝试、限流拒绝、审计事件、工具结果和工具耗时等指标。可选 Prometheus 资源位于 [`config/monitoring`](config/monitoring)。
+Server 输出 `audit_schema=v1` JSON 事件，但不包含 Token、planId、确认码、资源正文、patch、命令、stdin、日志或响应。`:9090/metrics` 提供认证尝试、限流拒绝、审计事件、工具结果和工具耗时等指标。可选 Prometheus 资源位于 [`config/monitoring`](config/monitoring)。
 
 启用 `SafeWrite` 或 `Dangerous` 前请阅读[安全模型](docs/security.zh-CN.md)。其中说明命名空间信任、TokenReview/RBAC、Origin 拒绝、Operator 管理资源自保护、SafeWrite payload 检查、计划预算、TLS 轮换、NetworkPolicy 和事件处理。
 
@@ -145,7 +152,7 @@ make fmt
 make vet
 make test
 make build
-make docker-build IMG=ghcr.io/your-org/supek8smcp:0.1.1
+make docker-build IMG=ghcr.io/your-org/supek8smcp:0.2.0
 ```
 
 API 类型变更时使用 `make manifests`，审查生成的 YAML，不要手工修改。发布镜像应使用不可变 tag 或 digest，并通过仓库的 release 自动化发布。提交改动或报告漏洞前请阅读 [`CHANGELOG.md`](CHANGELOG.md)、[`CONTRIBUTING.md`](CONTRIBUTING.md) 和 [`SECURITY.md`](SECURITY.md)。
