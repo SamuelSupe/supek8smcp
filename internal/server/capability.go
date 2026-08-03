@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
@@ -49,11 +50,18 @@ func (c Capability) AsAction() Action {
 }
 
 type capabilityCodec struct {
-	key [32]byte
+	key     [32]byte
+	mu      sync.RWMutex
+	handles map[string]capabilityHandle
+}
+
+type capabilityHandle struct {
+	payload    string
+	capability Capability
 }
 
 func newCapabilityCodec() (*capabilityCodec, error) {
-	codec := &capabilityCodec{}
+	codec := &capabilityCodec{handles: make(map[string]capabilityHandle)}
 	if _, err := rand.Read(codec.key[:]); err != nil {
 		return nil, fmt.Errorf("generate capability signing key: %w", err)
 	}
@@ -64,33 +72,48 @@ func (c *capabilityCodec) encode(capability Capability) string {
 	copy := capability
 	copy.ID = ""
 	data, _ := json.Marshal(copy)
-	payload := base64.RawURLEncoding.EncodeToString(data)
-	signature := c.sign([]byte(payload))
-	return payload + "." + base64.RawURLEncoding.EncodeToString(signature)
+	payload := string(data)
+	digest := c.sign(data)
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for bytes := 12; bytes <= len(digest); bytes += 4 {
+		id := "cap_" + base64.RawURLEncoding.EncodeToString(digest[:bytes])
+		if existing, found := c.handles[id]; found && existing.payload != payload {
+			continue
+		}
+		copy.ID = id
+		c.handles[id] = capabilityHandle{payload: payload, capability: copy}
+		return id
+	}
+	panic("capability handle collision across full HMAC digest")
 }
 
 func (c *capabilityCodec) decode(id string) (Capability, error) {
-	parts := strings.Split(id, ".")
-	if len(parts) != 2 {
+	if !strings.HasPrefix(id, "cap_") {
 		return Capability{}, policyError("invalid_capability", "capability ID is not valid")
 	}
-	signature, err := base64.RawURLEncoding.DecodeString(parts[1])
-	if err != nil || !hmac.Equal(signature, c.sign([]byte(parts[0]))) {
-		return Capability{}, policyError("invalid_capability", "capability ID is not valid")
+	c.mu.RLock()
+	entry, found := c.handles[id]
+	c.mu.RUnlock()
+	if !found {
+		return Capability{}, policyError("invalid_capability", "capability ID is unknown or expired; call k8s.search again")
 	}
-	data, err := base64.RawURLEncoding.DecodeString(parts[0])
-	if err != nil {
-		return Capability{}, policyError("invalid_capability", "capability ID is not valid")
-	}
-	var capability Capability
-	if err := json.Unmarshal(data, &capability); err != nil {
-		return Capability{}, policyError("invalid_capability", "capability ID is not valid")
-	}
-	if capability.Version == "" || capability.Resource == "" || capability.Action == "" || capability.Verb == "" {
-		return Capability{}, policyError("invalid_capability", "capability ID is incomplete")
-	}
+	capability := entry.capability
 	capability.ID = id
 	return capability, nil
+}
+
+func (c *capabilityCodec) retain(capabilities []Capability) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	current := make(map[string]capabilityHandle, len(capabilities))
+	for _, capability := range capabilities {
+		if handle, found := c.handles[capability.ID]; found {
+			current[capability.ID] = handle
+		}
+	}
+	c.handles = current
 }
 
 func (c *capabilityCodec) sign(payload []byte) []byte {

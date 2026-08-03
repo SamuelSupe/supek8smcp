@@ -3,23 +3,84 @@ package server
 import (
 	"encoding/base64"
 	"encoding/json"
+	"regexp"
+	"strings"
 
 	mcpv1alpha1 "github.com/samuelsupe/supek8smcp/api/v1alpha1"
 )
 
+var (
+	sensitiveAnnotationAssignment = regexp.MustCompile(`(?i)(api[._-]?key|token|password|passwd|secret|access[._-]?key|private[._-]?key|client[._-]?secret|credential)[^[:alnum:]]{0,4}[:=]`)
+	sensitiveBareKeyAssignment    = regexp.MustCompile(`(?i)(^|[^[:alnum:]_])key[^[:alnum:]]{0,4}[:=]`)
+)
+
 func redactResult(value any, action Action, policy mcpv1alpha1.SensitiveReadPolicy) (any, error) {
+	result := value
 	if action.GVR.Group == "" && action.GVR.Resource == "secrets" {
 		if policy == mcpv1alpha1.SensitiveReadDeny {
 			return nil, policyError("sensitive_read_denied", "Secret reads are disabled by policy")
 		}
 		if policy == mcpv1alpha1.SensitiveReadRedact {
-			return redactSecretCollection(value), nil
+			result = redactSecretCollection(value)
 		}
 	}
 	if action.GVR.Group == "" && action.GVR.Resource == "serviceaccounts" && action.Subresource == "token" && policy != mcpv1alpha1.SensitiveReadAllow {
 		return nil, policyError("sensitive_read_denied", "ServiceAccount token output requires sensitiveReads=Allow")
 	}
-	return value, nil
+	return redactSensitiveAnnotations(result, false), nil
+}
+
+func redactSensitiveAnnotations(value any, metadata bool) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		output := make(map[string]any, len(typed))
+		for key, child := range typed {
+			if metadata && key == "annotations" {
+				output[key] = redactAnnotationMap(child)
+				continue
+			}
+			output[key] = redactSensitiveAnnotations(child, key == "metadata")
+		}
+		return output
+	case []any:
+		output := make([]any, len(typed))
+		for index, child := range typed {
+			output[index] = redactSensitiveAnnotations(child, false)
+		}
+		return output
+	default:
+		return value
+	}
+}
+
+func redactAnnotationMap(value any) any {
+	annotations, ok := value.(map[string]any)
+	if !ok {
+		return value
+	}
+	output := make(map[string]any, len(annotations))
+	for key, raw := range annotations {
+		text, isString := raw.(string)
+		if sensitiveAnnotationName(key) || (isString && (sensitiveAnnotationAssignment.MatchString(text) || sensitiveBareKeyAssignment.MatchString(text))) {
+			output[key] = "<redacted>"
+			continue
+		}
+		output[key] = raw
+	}
+	return output
+}
+
+func sensitiveAnnotationName(name string) bool {
+	normalized := strings.NewReplacer("-", "_", ".", "_", "/", "_").Replace(strings.ToLower(name))
+	for _, marker := range []string{"api_key", "apikey", "token", "password", "passwd", "secret", "access_key", "private_key", "client_secret", "credential"} {
+		if strings.Contains(normalized, marker) {
+			return true
+		}
+	}
+	if normalized == "key" || strings.HasSuffix(normalized, "_key") || strings.Contains(normalized, "_key_") {
+		return true
+	}
+	return false
 }
 
 func redactSecretCollection(value any) any {

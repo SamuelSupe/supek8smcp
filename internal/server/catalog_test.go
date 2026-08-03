@@ -3,7 +3,6 @@ package server
 import (
 	"context"
 	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
@@ -36,6 +35,12 @@ func TestCapabilityCodecRoundTripAndTamperRejection(t *testing.T) {
 		Action: "patch", Verb: "patch", Namespaced: true,
 	}
 	id := codec.encode(want)
+	if !strings.HasPrefix(id, "cap_") {
+		t.Fatalf("encoded capability = %q, want short cap_ handle", id)
+	}
+	if len(id) <= len("cap_") || len(id) > 32 {
+		t.Fatalf("encoded capability length = %d (%q), want a bounded short handle", len(id), id)
+	}
 	got, err := codec.decode(id)
 	if err != nil {
 		t.Fatalf("decode(round trip) error = %v", err)
@@ -44,36 +49,19 @@ func TestCapabilityCodecRoundTripAndTamperRejection(t *testing.T) {
 		t.Fatalf("decode(round trip) = %#v, want fields from %#v", got, want)
 	}
 
-	parts := strings.Split(id, ".")
-	if len(parts) != 2 {
-		t.Fatalf("encoded capability = %q, want payload.signature", id)
+	mutated := id[:len(id)-1] + "A"
+	if mutated == id {
+		mutated = id[:len(id)-1] + "B"
 	}
-	payload, err := base64.RawURLEncoding.DecodeString(parts[0])
-	if err != nil {
-		t.Fatalf("decode payload: %v", err)
+	if _, err := codec.decode(mutated); policyReason(err) != "invalid_capability" {
+		t.Fatalf("mutated short handle decode error = %v, want invalid_capability", err)
 	}
-	var tampered Capability
-	if err := json.Unmarshal(payload, &tampered); err != nil {
-		t.Fatalf("decode payload JSON: %v", err)
+	if _, err := codec.decode(id + "x"); policyReason(err) != "invalid_capability" {
+		t.Fatalf("extended short handle decode error = %v, want invalid_capability", err)
 	}
-	tampered.Resource = "pods"
-	tamperedPayload, err := json.Marshal(tampered)
-	if err != nil {
-		t.Fatalf("encode tampered payload: %v", err)
-	}
-	tamperedID := base64.RawURLEncoding.EncodeToString(tamperedPayload) + "." + parts[1]
-	if _, err := codec.decode(tamperedID); policyReason(err) != "invalid_capability" {
-		t.Fatalf("tampered resource decode error = %v, want invalid_capability", err)
-	}
-
-	signatureBytes, err := base64.RawURLEncoding.DecodeString(parts[1])
-	if err != nil {
-		t.Fatalf("decode signature: %v", err)
-	}
-	signatureBytes[0] ^= 1
-	mutatedSignature := base64.RawURLEncoding.EncodeToString(signatureBytes)
-	if _, err := codec.decode(parts[0] + "." + mutatedSignature); policyReason(err) != "invalid_capability" {
-		t.Fatalf("tampered signature decode error = %v, want invalid_capability", err)
+	legacy := base64.RawURLEncoding.EncodeToString([]byte(`{"resource":"pods"}`)) + ".invalid"
+	if _, err := codec.decode(legacy); policyReason(err) != "invalid_capability" {
+		t.Fatalf("legacy payload handle decode error = %v, want invalid_capability", err)
 	}
 }
 
@@ -415,7 +403,7 @@ func TestSearchCatalogPassesNameToSelfSubjectAccessReview(t *testing.T) {
 	principal := &Principal{Kubernetes: client}
 	result, _, err := searchCatalog(
 		context.Background(), []Capability{capability}, NewPolicy(policyTestConfig(mcpv1alpha1.ModeReadOnly, mcpv1alpha1.SensitiveReadRedact)),
-		principal, "pods", "get", "workloads", "web", "", 1,
+		principal, catalogSearchFilter{Query: "pods", Action: "get", Namespace: "workloads", Name: "web"}, "", 1,
 	)
 	if err != nil {
 		t.Fatalf("searchCatalog() error = %v", err)
@@ -446,7 +434,7 @@ func TestSearchCatalogSkipsManagedMutationWithoutSelfSubjectAccessReview(t *test
 	policy := NewPolicy(managedTargetPolicyTestConfig())
 	result, cursor, err := searchCatalog(
 		context.Background(), []Capability{capability}, policy, &Principal{Kubernetes: client},
-		"", "", policy.config.Namespace, policy.config.Name+"-config", "", 1,
+		catalogSearchFilter{Namespace: policy.config.Namespace, Name: policy.config.Name + "-config"}, "", 1,
 	)
 	if err != nil {
 		t.Fatalf("searchCatalog() error = %v", err)
@@ -484,7 +472,7 @@ func TestSearchCatalogBoundsAuthorizationChecksAndAdvancesCursor(t *testing.T) {
 	principal := &Principal{Kubernetes: client}
 	policy := NewPolicy(policyTestConfig(mcpv1alpha1.ModeReadOnly, mcpv1alpha1.SensitiveReadRedact))
 
-	first, cursor, err := searchCatalog(context.Background(), items, policy, principal, "", "", "workloads", "", "", 200)
+	first, cursor, err := searchCatalog(context.Background(), items, policy, principal, catalogSearchFilter{Namespace: "workloads"}, "", 200)
 	if err != nil {
 		t.Fatalf("first searchCatalog() error = %v", err)
 	}
@@ -498,7 +486,7 @@ func TestSearchCatalogBoundsAuthorizationChecksAndAdvancesCursor(t *testing.T) {
 		t.Fatal("first search returned empty cursor after authorization budget was exhausted")
 	}
 
-	second, nextCursor, err := searchCatalog(context.Background(), items, policy, principal, "", "", "workloads", "", cursor, 200)
+	second, nextCursor, err := searchCatalog(context.Background(), items, policy, principal, catalogSearchFilter{Namespace: "workloads"}, cursor, 200)
 	if err != nil {
 		t.Fatalf("cursor searchCatalog() error = %v", err)
 	}
@@ -510,5 +498,97 @@ func TestSearchCatalogBoundsAuthorizationChecksAndAdvancesCursor(t *testing.T) {
 	}
 	if nextCursor != "" {
 		t.Fatalf("cursor search returned nextCursor %q after exhausting capabilities", nextCursor)
+	}
+}
+
+func TestSearchCatalogExactCapabilityFilters(t *testing.T) {
+	t.Parallel()
+
+	items := []Capability{
+		{Version: "v1", Resource: "pods", Kind: "Pod", Action: "get", Verb: "get", Namespaced: true},
+		{Version: "v1", Resource: "pods", Subresource: "log", Kind: "Pod", Action: "logs", Verb: "get", Namespaced: true},
+		{Version: "v1", Resource: "podmetrics", Kind: "PodMetrics", Action: "get", Verb: "get", Namespaced: true},
+		{Group: "apps", Version: "v1", Resource: "deployments", Kind: "Deployment", Action: "get", Verb: "get", Namespaced: true},
+		{Group: "apps", Version: "v1beta1", Resource: "deployments", Kind: "Deployment", Action: "get", Verb: "get", Namespaced: true},
+	}
+	client := k8sfake.NewSimpleClientset()
+	client.PrependReactor("create", "selfsubjectaccessreviews", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		return true, &authorizationv1.SelfSubjectAccessReview{
+			Status: authorizationv1.SubjectAccessReviewStatus{Allowed: true},
+		}, nil
+	})
+	policy := NewPolicy(policyTestConfig(mcpv1alpha1.ModeReadOnly, mcpv1alpha1.SensitiveReadRedact))
+	principal := &Principal{Kubernetes: client}
+	tests := []struct {
+		name   string
+		filter catalogSearchFilter
+		want   []struct{ group, version, resource, subresource, kind, action string }
+	}{
+		{
+			name:   "exact kind",
+			filter: catalogSearchFilter{ExactKind: "pod", Namespace: "workloads"},
+			want: []struct{ group, version, resource, subresource, kind, action string }{
+				{version: "v1", resource: "pods", kind: "Pod", action: "get"},
+				{version: "v1", resource: "pods", subresource: "log", kind: "Pod", action: "logs"},
+			},
+		},
+		{
+			name:   "exact resource subresource",
+			filter: catalogSearchFilter{ExactResource: "pods/log", Namespace: "workloads"},
+			want: []struct{ group, version, resource, subresource, kind, action string }{
+				{version: "v1", resource: "pods", subresource: "log", kind: "Pod", action: "logs"},
+			},
+		},
+		{
+			name:   "exact action",
+			filter: catalogSearchFilter{Action: "logs", Namespace: "workloads"},
+			want: []struct{ group, version, resource, subresource, kind, action string }{
+				{version: "v1", resource: "pods", subresource: "log", kind: "Pod", action: "logs"},
+			},
+		},
+		{
+			name:   "core api group",
+			filter: catalogSearchFilter{APIGroup: "core", Namespace: "workloads"},
+			want: []struct{ group, version, resource, subresource, kind, action string }{
+				{version: "v1", resource: "pods", kind: "Pod", action: "get"},
+				{version: "v1", resource: "pods", subresource: "log", kind: "Pod", action: "logs"},
+				{version: "v1", resource: "podmetrics", kind: "PodMetrics", action: "get"},
+			},
+		},
+		{
+			name:   "exact api group",
+			filter: catalogSearchFilter{APIGroup: "apps", Namespace: "workloads"},
+			want: []struct{ group, version, resource, subresource, kind, action string }{
+				{group: "apps", version: "v1", resource: "deployments", kind: "Deployment", action: "get"},
+				{group: "apps", version: "v1beta1", resource: "deployments", kind: "Deployment", action: "get"},
+			},
+		},
+		{
+			name:   "exact version",
+			filter: catalogSearchFilter{Version: "v1beta1", Namespace: "workloads"},
+			want: []struct{ group, version, resource, subresource, kind, action string }{
+				{group: "apps", version: "v1beta1", resource: "deployments", kind: "Deployment", action: "get"},
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, next, err := searchCatalog(context.Background(), items, policy, principal, tt.filter, "", 20)
+			if err != nil {
+				t.Fatalf("searchCatalog() error = %v", err)
+			}
+			if next != "" {
+				t.Fatalf("searchCatalog() next cursor = %q, want empty", next)
+			}
+			if len(got) != len(tt.want) {
+				t.Fatalf("searchCatalog() returned %d capabilities (%#v), want %d (%#v)", len(got), got, len(tt.want), tt.want)
+			}
+			for index, want := range tt.want {
+				capability := got[index]
+				if capability.Group != want.group || capability.Version != want.version || capability.Resource != want.resource || capability.Subresource != want.subresource || capability.Kind != want.kind || capability.Action != want.action {
+					t.Errorf("result[%d] = %#v, want group=%q version=%q resource=%q subresource=%q kind=%q action=%q", index, capability, want.group, want.version, want.resource, want.subresource, want.kind, want.action)
+				}
+			}
+		})
 	}
 }

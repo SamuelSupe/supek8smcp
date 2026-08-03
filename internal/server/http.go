@@ -29,11 +29,11 @@ func prepareMCPRequestBody(writer http.ResponseWriter, request *http.Request) bo
 			}
 			var tooLarge *http.MaxBytesError
 			if errors.As(err, &tooLarge) {
-				http.Error(writer, "MCP request body exceeds maxInputBytes", http.StatusRequestEntityTooLarge)
+				writeStructuredHTTPError(writer, http.StatusRequestEntityTooLarge, "request_too_large", "MCP request body exceeds maxInputBytes", false)
 				return false
 			}
 			if !errors.Is(err, io.EOF) {
-				http.Error(writer, "cannot read MCP request body", http.StatusBadRequest)
+				writeStructuredHTTPError(writer, http.StatusBadRequest, "invalid_request", "cannot read MCP request body", false)
 				return false
 			}
 			return true
@@ -47,9 +47,17 @@ func prepareMCPRequestBody(writer http.ResponseWriter, request *http.Request) bo
 			request.ContentLength = max(0, request.ContentLength-discarded)
 		}
 		if first == '[' {
-			http.Error(writer, "JSON-RPC batches are not supported", http.StatusBadRequest)
+			writeStructuredHTTPError(writer, http.StatusBadRequest, "invalid_request", "JSON-RPC batches are not supported", false)
 			return false
 		}
 		return true
 	}
+}
+
+func serveStatelessSessionClose(writer http.ResponseWriter, request *http.Request) bool {
+	if request.Method != http.MethodDelete {
+		return false
+	}
+	writer.WriteHeader(http.StatusNoContent)
+	return true
 }

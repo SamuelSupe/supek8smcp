@@ -123,6 +123,101 @@ func TestSchemaForCapabilityFieldPathPrunesSiblingBranches(t *testing.T) {
 	}
 }
 
+func TestSchemaForCapabilityFieldPathTraversesCombinatorsAndRefs(t *testing.T) {
+	t.Parallel()
+
+	document := map[string]any{
+		"components": map[string]any{
+			"schemas": map[string]any{
+				"io.k8s.apps.v1.Deployment": map[string]any{
+					"type": "object",
+					"x-kubernetes-group-version-kind": []any{map[string]any{
+						"group": "apps", "version": "v1", "kind": "Deployment",
+					}},
+					"properties": map[string]any{
+						"spec": map[string]any{"allOf": []any{
+							map[string]any{"$ref": "#/components/schemas/DeploymentSpec"},
+							map[string]any{"$ref": "#/components/schemas/DeploymentStrategy"},
+						}},
+					},
+				},
+				"DeploymentSpec": map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"template": map[string]any{"$ref": "#/components/schemas/PodTemplate"},
+					},
+				},
+				"DeploymentStrategy": map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"strategy": map[string]any{"oneOf": []any{
+							map[string]any{"$ref": "#/components/schemas/RollingStrategy"},
+							map[string]any{"$ref": "#/components/schemas/RecreateStrategy"},
+						}},
+					},
+				},
+				"RollingStrategy": map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"mode":           map[string]any{"type": "string", "enum": []any{"RollingUpdate"}},
+						"maxUnavailable": map[string]any{"type": "string"},
+					},
+				},
+				"RecreateStrategy": map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"mode":   map[string]any{"type": "string", "enum": []any{"Recreate"}},
+						"paused": map[string]any{"type": "boolean"},
+					},
+				},
+				"PodTemplate": map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"spec": map[string]any{"anyOf": []any{
+							map[string]any{"$ref": "#/components/schemas/PodSpecA"},
+							map[string]any{"$ref": "#/components/schemas/PodSpecB"},
+						}},
+					},
+				},
+				"PodSpecA": map[string]any{
+					"type":       "object",
+					"properties": map[string]any{"containers": map[string]any{"type": "array"}},
+				},
+				"PodSpecB": map[string]any{
+					"type":       "object",
+					"properties": map[string]any{"containers": map[string]any{"type": "array", "x-source": "fallback"}},
+				},
+			},
+		},
+	}
+	principal := newSchemaTestPrincipal(t, document)
+	tests := []struct {
+		name       string
+		fieldPath  string
+		combinator string
+		wantCount  int
+	}{
+		{name: "allOf ref then anyOf ref", fieldPath: "spec.template.spec.containers", combinator: "anyOf", wantCount: 2},
+		{name: "allOf ref then oneOf ref", fieldPath: "spec.strategy.mode", combinator: "oneOf", wantCount: 2},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := schemaForCapability(principal, schemaTestCapability(), tt.fieldPath, 8)
+			if err != nil {
+				t.Fatalf("schemaForCapability(%q) error = %v", tt.fieldPath, err)
+			}
+			result, ok := got.(map[string]any)
+			if !ok {
+				t.Fatalf("schemaForCapability(%q) result type = %T, want map", tt.fieldPath, got)
+			}
+			branches, ok := result[tt.combinator].([]any)
+			if !ok || len(branches) != tt.wantCount {
+				t.Fatalf("schemaForCapability(%q) %s branches = %#v, want %d", tt.fieldPath, tt.combinator, result[tt.combinator], tt.wantCount)
+			}
+		})
+	}
+}
+
 func TestSchemaForCapabilityExpansionBudgetTruncatesDeterministically(t *testing.T) {
 	t.Parallel()
 

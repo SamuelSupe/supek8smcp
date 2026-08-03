@@ -34,9 +34,7 @@ func schemaForCapability(principal *Principal, capability Capability, fieldPath 
 	if fieldPath != "" {
 		current := selected
 		for _, part := range strings.Split(fieldPath, ".") {
-			current = dereferenceSchema(current, schemas)
-			properties, _ := current["properties"].(map[string]any)
-			next, ok := properties[part].(map[string]any)
+			next, ok := schemaProperty(current, part, schemas, map[string]bool{})
 			if !ok {
 				return nil, policyError("schema_path_not_found", fmt.Sprintf("field path %q does not exist", fieldPath))
 			}
@@ -48,20 +46,47 @@ func schemaForCapability(principal *Principal, capability Capability, fieldPath 
 	return expandSchema(selected, schemas, depth, map[string]bool{}, budget), nil
 }
 
-func dereferenceSchema(current map[string]any, schemas map[string]any) map[string]any {
-	seen := map[string]bool{}
-	for {
-		reference, _ := current["$ref"].(string)
-		if !strings.HasPrefix(reference, "#/components/schemas/") || seen[reference] {
-			return current
+func schemaProperty(current map[string]any, name string, schemas map[string]any, seenRefs map[string]bool) (map[string]any, bool) {
+	if properties, ok := current["properties"].(map[string]any); ok {
+		if property, ok := properties[name].(map[string]any); ok {
+			return property, true
 		}
-		seen[reference] = true
-		next, ok := schemas[strings.TrimPrefix(reference, "#/components/schemas/")].(map[string]any)
-		if !ok {
-			return current
-		}
-		current = next
 	}
+
+	if reference, _ := current["$ref"].(string); strings.HasPrefix(reference, "#/components/schemas/") && !seenRefs[reference] {
+		seenRefs[reference] = true
+		if target, ok := schemas[strings.TrimPrefix(reference, "#/components/schemas/")].(map[string]any); ok {
+			if property, found := schemaProperty(target, name, schemas, seenRefs); found {
+				delete(seenRefs, reference)
+				return property, true
+			}
+		}
+		delete(seenRefs, reference)
+	}
+
+	for _, combinator := range []string{"allOf", "oneOf", "anyOf"} {
+		branches, _ := current[combinator].([]any)
+		matches := make([]any, 0, len(branches))
+		for _, raw := range branches {
+			branch, ok := raw.(map[string]any)
+			if !ok {
+				continue
+			}
+			property, found := schemaProperty(branch, name, schemas, seenRefs)
+			if found {
+				matches = append(matches, property)
+			}
+		}
+		switch len(matches) {
+		case 0:
+			continue
+		case 1:
+			return matches[0].(map[string]any), true
+		default:
+			return map[string]any{combinator: matches}, true
+		}
+	}
+	return nil, false
 }
 
 type schemaExpansionBudget struct {

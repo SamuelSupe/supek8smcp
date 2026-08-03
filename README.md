@@ -12,16 +12,16 @@ Turn a namespaced custom resource into a single-replica, HTTPS Streamable HTTP M
 [![GHCR](https://img.shields.io/badge/GHCR-container-2496ED?logo=docker&logoColor=white)](https://github.com/samuelsupe/supek8smcp/pkgs/container/supek8smcp)
 [![Go](https://img.shields.io/badge/go-1.25.12-00ADD8?logo=go&logoColor=white)](go.mod)
 
-## v0.2.0 downloads
+## v0.3.0 downloads
 
-- [Linux x64 (amd64) archive](https://github.com/SamuelSupe/supek8smcp/releases/download/v0.2.0/supek8smcp_0.2.0_linux_amd64.tar.gz)
-- [Linux ARM64 archive](https://github.com/SamuelSupe/supek8smcp/releases/download/v0.2.0/supek8smcp_0.2.0_linux_arm64.tar.gz)
-- [SHA-256 checksums](https://github.com/SamuelSupe/supek8smcp/releases/download/v0.2.0/checksums.txt)
+- [Linux x64 (amd64) archive](https://github.com/SamuelSupe/supek8smcp/releases/download/v0.3.0/supek8smcp_0.3.0_linux_amd64.tar.gz)
+- [Linux ARM64 archive](https://github.com/SamuelSupe/supek8smcp/releases/download/v0.3.0/supek8smcp_0.3.0_linux_arm64.tar.gz)
+- [SHA-256 checksums](https://github.com/SamuelSupe/supek8smcp/releases/download/v0.3.0/checksums.txt)
 
 Install or upgrade the Operator chart directly from the GitHub Release:
 
 ```bash
-helm upgrade --install supek8smcp https://github.com/SamuelSupe/supek8smcp/releases/download/v0.2.0/supek8smcp-0.2.0.tgz \
+helm upgrade --install supek8smcp https://github.com/SamuelSupe/supek8smcp/releases/download/v0.3.0/supek8smcp-0.3.0.tgz \
   --namespace supek8smcp-system --create-namespace
 ```
 
@@ -29,9 +29,9 @@ helm upgrade --install supek8smcp https://github.com/SamuelSupe/supek8smcp/relea
 
 ## What it provides
 
-- A progressively disclosed MCP surface: start with `k8s.help`, search for a signed capability, inspect or read only the selected resource, and use the explicit plan/commit boundary for writes.
+- A progressively disclosed MCP surface: start with `k8s.help`, search for a compact opaque `cap_` capability handle, inspect or read only the selected resource, and use the explicit plan/commit boundary for writes.
 - Three modes with conservative defaults and independent scope, policy, timeout, byte, list, concurrency, and per-identity rate budgets.
-- Secret redaction by default, bounded schema expansion, bounded logs and exec/attach, structured security audit events, Prometheus metrics, and optional alerts.
+- Compact list/watch summaries by default, recursive omission of annotations and managed fields, credential-like annotation redaction, bounded schema/log/exec output, structured errors and audit events, Prometheus metrics, and optional alerts.
 - Operator-managed shared CA and automatic serving-leaf rotation, or a validated same-namespace `kubernetes.io/tls` Secret.
 
 ## Modes at a glance
@@ -58,7 +58,7 @@ sequenceDiagram
     S-->>C: mode-aware tools and detailsRequest
     C->>S: k8s.search (query + optional name)
     S->>K: TokenReview, then SSAR/resource discovery
-    S-->>C: signed capability IDs
+    S-->>C: compact cap_ capability handles
     C->>S: k8s.describe / k8s.read
     S->>K: same caller token, bounded request
     S-->>C: bounded result + audit event
@@ -70,7 +70,22 @@ sequenceDiagram
     S->>K: recheck, then one authorized write
 ```
 
-`k8s.help` is local static data, but requests still pass authentication, rate limiting, and audit. `k8s.describe` locates an exact `fieldPath` before expanding `$ref` schemas and caps one expansion at 10,000 nodes. List calls page at most eight upstream objects and preserve Kubernetes `continue` tokens. Non-watch delegated, discovery, and OpenAPI responses are capped at 8 MiB.
+`k8s.help` is local static data, but requests still pass authentication, rate limiting, and audit. `k8s.search` supports exact kind, resource, API group, version, and action filters. `k8s.describe` resolves exact `fieldPath` values through `$ref`, `allOf`, `oneOf`, and `anyOf` before expansion and caps one expansion at 10,000 nodes. List calls page at most eight upstream objects and preserve Kubernetes `continue` tokens. Non-watch delegated, discovery, and OpenAPI responses are capped at 8 MiB.
+
+### Compact read output
+
+`k8s.read` list and watch actions default to `outputMode: summary`; get defaults to `full`. Every mode recursively omits `metadata.annotations` and `metadata.managedFields` unless `omitAnnotations: false` or `omitManagedFields: false` is explicit. Credential-like annotation keys or embedded assignments remain redacted when annotations are included. Use `table` for the smallest repeated-row representation, `full` only when the whole object is needed, or `fieldPaths` to project the same object-relative paths from one object or every list item:
+
+```json
+{
+  "capabilityId": "cap_example",
+  "namespace": "platform",
+  "outputMode": "summary",
+  "fieldPaths": ["metadata.name", "status.phase", "status.reason"]
+}
+```
+
+Tool and HTTP failures use `{ "code": "scope_denied", "message": "...", "retryable": false }`. An unknown process-local capability handle is not retryable as-is: call `k8s.search` again to obtain a current handle.
 
 ## Architecture
 
@@ -90,7 +105,7 @@ Create a dedicated endpoint namespace first. Anyone who can create a Pod there m
 
 ```bash
 make install
-make deploy IMG=ghcr.io/your-org/supek8smcp:0.2.0
+make deploy IMG=ghcr.io/your-org/supek8smcp:0.3.0
 kubectl create namespace supek8smcp-servers
 ```
 
@@ -130,7 +145,7 @@ Use `status.endpoint` and the CA from `status.caConfigMapName`; send a short-liv
 Build and publish an immutable image, then install the CRD and Operator:
 
 ```bash
-export IMG=registry.example.com/platform/supek8smcp:0.2.0
+export IMG=registry.example.com/platform/supek8smcp:0.3.0
 make docker-build IMG="$IMG"
 docker push "$IMG"
 make install
@@ -152,7 +167,7 @@ make fmt
 make vet
 make test
 make build
-make docker-build IMG=ghcr.io/your-org/supek8smcp:0.2.0
+make docker-build IMG=ghcr.io/your-org/supek8smcp:0.3.0
 ```
 
 Use `make manifests` when API types change; review generated YAML rather than editing it by hand. Release images should use immutable tags or digests and be published through the repository's release automation. See [`CHANGELOG.md`](CHANGELOG.md), [`CONTRIBUTING.md`](CONTRIBUTING.md), and [`SECURITY.md`](SECURITY.md) before opening a change or reporting a vulnerability.

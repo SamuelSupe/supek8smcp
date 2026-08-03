@@ -215,14 +215,3 @@ func hardDeniedInSafeMode(action Action) bool {
 		"apiregistration.k8s.io", "certificates.k8s.io", "authentication.k8s.io", "authorization.k8s.io",
 	}, action.GVR.Group)
 }
-
-type toolError struct {
-	Reason  string `json:"reason"`
-	Message string `json:"message"`
-}
-
-func (e *toolError) Error() string { return e.Reason + ": " + e.Message }
-
-func policyError(reason, message string) error {
-	return &toolError{Reason: reason, Message: message}
-}

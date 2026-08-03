@@ -249,14 +249,14 @@ func (a *App) authenticationMiddleware(next http.Handler) http.Handler {
 		started := time.Now()
 		if request.Header.Get("Origin") != "" {
 			a.recordAuthentication(nil, "deny", "browser_origin", started)
-			http.Error(writer, "browser Origin requests are not accepted", http.StatusForbidden)
+			writeStructuredHTTPError(writer, http.StatusForbidden, "browser_origin", "browser Origin requests are not accepted", false)
 			return
 		}
 		header := request.Header.Get("Authorization")
 		if !strings.HasPrefix(header, "Bearer ") || len(header) <= len("Bearer ") {
 			a.recordAuthentication(nil, "deny", "missing_bearer", started)
 			writer.Header().Set("WWW-Authenticate", `Bearer realm="kubernetes"`)
-			http.Error(writer, "Kubernetes bearer token required", http.StatusUnauthorized)
+			writeStructuredHTTPError(writer, http.StatusUnauthorized, "missing_bearer", "Kubernetes bearer token required", false)
 			return
 		}
 		queueCtx, queueCancel := a.requestContext(request.Context())
@@ -268,7 +268,7 @@ func (a *App) authenticationMiddleware(next http.Handler) http.Handler {
 			queueCancel()
 			a.recordAuthentication(nil, "error", "concurrency_timeout", started)
 			writer.Header().Set("Retry-After", "1")
-			http.Error(writer, "server concurrency limit reached", http.StatusServiceUnavailable)
+			writeStructuredHTTPError(writer, http.StatusServiceUnavailable, "concurrency_timeout", "server concurrency limit reached", true)
 			return
 		}
 		authCtx, cancel := a.requestContext(request.Context())
@@ -283,9 +283,9 @@ func (a *App) authenticationMiddleware(next http.Handler) http.Handler {
 			a.recordAuthentication(nil, decision, reason, started)
 			if status == http.StatusUnauthorized {
 				writer.Header().Set("WWW-Authenticate", `Bearer realm="kubernetes", error="invalid_token"`)
-				http.Error(writer, "invalid Kubernetes bearer token", status)
+				writeStructuredHTTPError(writer, status, reason, "invalid Kubernetes bearer token", false)
 			} else {
-				http.Error(writer, "Kubernetes authentication service unavailable", status)
+				writeStructuredHTTPError(writer, status, reason, "Kubernetes authentication service unavailable", true)
 			}
 			return
 		}
@@ -293,7 +293,7 @@ func (a *App) authenticationMiddleware(next http.Handler) http.Handler {
 		if allowed, reason := a.rateLimiter.Allow(principal.IdentityKey(), time.Now()); !allowed {
 			a.recordRateLimit(principal, reason, started)
 			writer.Header().Set("Retry-After", strconv.Itoa(a.rateLimiter.RetryAfterSeconds()))
-			http.Error(writer, "authenticated identity rate limit exceeded", http.StatusTooManyRequests)
+			writeStructuredHTTPError(writer, http.StatusTooManyRequests, reason, "authenticated identity rate limit exceeded", true)
 			return
 		}
 		ctx := context.WithValue(request.Context(), principalContextKey{}, principal)

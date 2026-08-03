@@ -1,7 +1,7 @@
 SHELL := /bin/sh
 
-IMG ?= ghcr.io/samuelsupe/supek8smcp:0.2.0
-VERSION ?= 0.2.0
+IMG ?= ghcr.io/samuelsupe/supek8smcp:0.3.0
+VERSION ?= 0.3.0
 CONTROLLER_GEN ?= go run sigs.k8s.io/controller-tools/cmd/controller-gen@v0.19.0
 KUSTOMIZE ?= kubectl kustomize --load-restrictor LoadRestrictionsNone
 HELM ?= helm
@@ -51,7 +51,7 @@ uninstall:
 	kubectl delete --ignore-not-found=true -f config/crd/bases
 
 deploy:
-	$(KUSTOMIZE) config/default | sed 's|ghcr.io/samuelsupe/supek8smcp:0.2.0|$(IMG)|g' | kubectl apply -f -
+	$(KUSTOMIZE) config/default | sed 's|ghcr.io/samuelsupe/supek8smcp:0.3.0|$(IMG)|g' | kubectl apply -f -
 
 undeploy:
 	$(KUSTOMIZE) config/default | kubectl delete --ignore-not-found=true -f -

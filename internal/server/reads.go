@@ -18,12 +18,16 @@ import (
 const kubernetesListPageLimit int64 = 8
 
 type SearchInput struct {
-	Query     string `json:"query,omitempty" jsonschema:"kind, resource, API group, category, or action to search for"`
-	Action    string `json:"action,omitempty" jsonschema:"optional action or Kubernetes verb filter"`
-	Namespace string `json:"namespace,omitempty" jsonschema:"namespace used for scope and RBAC filtering"`
-	Name      string `json:"name,omitempty" jsonschema:"optional resource name for Kubernetes roles restricted by resourceNames"`
-	Cursor    string `json:"cursor,omitempty" jsonschema:"opaque cursor from a previous response"`
-	Limit     int64  `json:"limit,omitempty" jsonschema:"maximum capabilities to return"`
+	Query         string `json:"query,omitempty" jsonschema:"kind, resource, API group, category, or action to search for"`
+	Action        string `json:"action,omitempty" jsonschema:"optional exact action or Kubernetes verb filter"`
+	ExactKind     string `json:"exactKind,omitempty" jsonschema:"optional exact Kubernetes kind filter"`
+	ExactResource string `json:"exactResource,omitempty" jsonschema:"optional exact plural resource or resource/subresource filter"`
+	APIGroup      string `json:"apiGroup,omitempty" jsonschema:"optional exact API group filter; use core for the core API group"`
+	Version       string `json:"version,omitempty" jsonschema:"optional exact API version filter"`
+	Namespace     string `json:"namespace,omitempty" jsonschema:"namespace used for scope and RBAC filtering"`
+	Name          string `json:"name,omitempty" jsonschema:"optional resource name for Kubernetes roles restricted by resourceNames"`
+	Cursor        string `json:"cursor,omitempty" jsonschema:"opaque cursor from a previous response"`
+	Limit         int64  `json:"limit,omitempty" jsonschema:"maximum capabilities to return"`
 }
 
 type SearchOutput struct {
@@ -42,7 +46,10 @@ func (a *App) search(ctx context.Context, principal *Principal, input SearchInpu
 	if limit <= 0 || limit > a.config.Spec.Limits.MaxListItems {
 		limit = min(a.config.Spec.Limits.MaxListItems, 20)
 	}
-	capabilities, next, err := searchCatalog(ctx, items, a.policy, principal, input.Query, input.Action, input.Namespace, input.Name, input.Cursor, limit)
+	capabilities, next, err := searchCatalog(ctx, items, a.policy, principal, catalogSearchFilter{
+		Query: input.Query, Action: input.Action, ExactKind: input.ExactKind, ExactResource: input.ExactResource,
+		APIGroup: input.APIGroup, Version: input.Version, Namespace: input.Namespace, Name: input.Name,
+	}, input.Cursor, limit)
 	if err != nil {
 		return SearchOutput{}, err
 	}
@@ -88,17 +95,21 @@ func (a *App) describe(ctx context.Context, principal *Principal, input Describe
 }
 
 type ReadInput struct {
-	CapabilityID  string `json:"capabilityId" jsonschema:"read capability ID returned by k8s.search"`
-	Namespace     string `json:"namespace,omitempty"`
-	Name          string `json:"name,omitempty"`
-	LabelSelector string `json:"labelSelector,omitempty"`
-	FieldSelector string `json:"fieldSelector,omitempty"`
-	Cursor        string `json:"cursor,omitempty" jsonschema:"Kubernetes list continue token"`
-	Limit         int64  `json:"limit,omitempty"`
-	Follow        bool   `json:"follow,omitempty"`
-	Container     string `json:"container,omitempty"`
-	TailLines     *int64 `json:"tailLines,omitempty"`
-	SinceSeconds  *int64 `json:"sinceSeconds,omitempty"`
+	CapabilityID      string   `json:"capabilityId" jsonschema:"read capability ID returned by k8s.search"`
+	Namespace         string   `json:"namespace,omitempty"`
+	Name              string   `json:"name,omitempty"`
+	LabelSelector     string   `json:"labelSelector,omitempty"`
+	FieldSelector     string   `json:"fieldSelector,omitempty"`
+	Cursor            string   `json:"cursor,omitempty" jsonschema:"Kubernetes list continue token"`
+	Limit             int64    `json:"limit,omitempty"`
+	OutputMode        string   `json:"outputMode,omitempty" jsonschema:"response shape: summary, table, or full; list and watch default to summary while get defaults to full"`
+	OmitManagedFields *bool    `json:"omitManagedFields,omitempty" jsonschema:"omit metadata.managedFields recursively; defaults to true"`
+	OmitAnnotations   *bool    `json:"omitAnnotations,omitempty" jsonschema:"omit metadata.annotations recursively; defaults to true"`
+	FieldPaths        []string `json:"fieldPaths,omitempty" jsonschema:"object-relative dot paths to project; applied to every list item and incompatible with table mode"`
+	Follow            bool     `json:"follow,omitempty"`
+	Container         string   `json:"container,omitempty"`
+	TailLines         *int64   `json:"tailLines,omitempty"`
+	SinceSeconds      *int64   `json:"sinceSeconds,omitempty"`
 }
 
 func (a *App) read(ctx context.Context, request *mcp.CallToolRequest, principal *Principal, input ReadInput) (map[string]any, error) {
@@ -109,6 +120,10 @@ func (a *App) read(ctx context.Context, request *mcp.CallToolRequest, principal 
 	action := capability.AsAction()
 	if action.Mutating() || !containsString([]string{"get", "list", "watch", "logs"}, action.Action) {
 		return nil, policyError("invalid_capability", "k8s.read only accepts get, list, watch, and logs capabilities")
+	}
+	outputOptions, err := normalizeReadOutputOptions(action, input)
+	if err != nil {
+		return nil, err
 	}
 	if action.Action == "logs" && input.Follow && a.config.Spec.Mode != mcpv1alpha1.ModeDangerous {
 		return nil, policyError("mode_denied", "followed log streams require Dangerous mode")
@@ -144,7 +159,7 @@ func (a *App) read(ctx context.Context, request *mcp.CallToolRequest, principal 
 		}
 		result = list.UnstructuredContent()
 	case "watch":
-		output, err := a.watch(ctx, request, principal, action, namespace, input)
+		output, err := a.watch(ctx, request, principal, action, namespace, input, outputOptions)
 		if err != nil {
 			return nil, err
 		}
@@ -160,7 +175,10 @@ func (a *App) read(ctx context.Context, request *mcp.CallToolRequest, principal 
 	if err != nil {
 		return nil, err
 	}
-	output, _ := redacted.(map[string]any)
+	output, err := shapeReadOutput(redacted, action, outputOptions)
+	if err != nil {
+		return nil, err
+	}
 	return boundedOutput(output, a.config.Spec.Limits.MaxOutputBytes), nil
 }
 
@@ -171,7 +189,7 @@ func (a *App) kubernetesListLimit(requested int64) int64 {
 	return min(requested, kubernetesListPageLimit)
 }
 
-func (a *App) watch(ctx context.Context, request *mcp.CallToolRequest, principal *Principal, action Action, namespace string, input ReadInput) (map[string]any, error) {
+func (a *App) watch(ctx context.Context, request *mcp.CallToolRequest, principal *Principal, action Action, namespace string, input ReadInput, outputOptions readOutputOptions) (map[string]any, error) {
 	streamCtx, cancel := context.WithTimeout(ctx, a.config.Spec.Limits.StreamTimeout.Duration)
 	defer cancel()
 	watcher, err := dynamicResource(principal, action, namespace).Watch(streamCtx, metav1.ListOptions{
@@ -199,7 +217,11 @@ func (a *App) watch(ctx context.Context, request *mcp.CallToolRequest, principal
 			if err != nil {
 				return nil, err
 			}
-			entry := map[string]any{"type": string(event.Type), "object": redacted}
+			shaped, err := shapeReadOutput(redacted, action, outputOptions)
+			if err != nil {
+				return nil, err
+			}
+			entry := map[string]any{"type": string(event.Type), "object": shaped}
 			entryData, _ := json.Marshal(entry)
 			if outputBytes+int64(len(entryData)) > a.config.Spec.Limits.MaxOutputBytes {
 				return map[string]any{"events": items, "ended": "output limit reached", "truncated": true}, nil

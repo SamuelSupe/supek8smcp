@@ -12,16 +12,16 @@
 [![GHCR](https://img.shields.io/badge/GHCR-container-2496ED?logo=docker&logoColor=white)](https://github.com/samuelsupe/supek8smcp/pkgs/container/supek8smcp)
 [![Go](https://img.shields.io/badge/go-1.25.12-00ADD8?logo=go&logoColor=white)](go.mod)
 
-## v0.2.0 下载
+## v0.3.0 下载
 
-- [Linux x64（amd64）压缩包](https://github.com/SamuelSupe/supek8smcp/releases/download/v0.2.0/supek8smcp_0.2.0_linux_amd64.tar.gz)
-- [Linux ARM64 压缩包](https://github.com/SamuelSupe/supek8smcp/releases/download/v0.2.0/supek8smcp_0.2.0_linux_arm64.tar.gz)
-- [SHA-256 校验和](https://github.com/SamuelSupe/supek8smcp/releases/download/v0.2.0/checksums.txt)
+- [Linux x64（amd64）压缩包](https://github.com/SamuelSupe/supek8smcp/releases/download/v0.3.0/supek8smcp_0.3.0_linux_amd64.tar.gz)
+- [Linux ARM64 压缩包](https://github.com/SamuelSupe/supek8smcp/releases/download/v0.3.0/supek8smcp_0.3.0_linux_arm64.tar.gz)
+- [SHA-256 校验和](https://github.com/SamuelSupe/supek8smcp/releases/download/v0.3.0/checksums.txt)
 
 直接从 GitHub Release 安装或升级 Operator chart：
 
 ```bash
-helm upgrade --install supek8smcp https://github.com/SamuelSupe/supek8smcp/releases/download/v0.2.0/supek8smcp-0.2.0.tgz \
+helm upgrade --install supek8smcp https://github.com/SamuelSupe/supek8smcp/releases/download/v0.3.0/supek8smcp-0.3.0.tgz \
   --namespace supek8smcp-system --create-namespace
 ```
 
@@ -29,9 +29,9 @@ helm upgrade --install supek8smcp https://github.com/SamuelSupe/supek8smcp/relea
 
 ## 提供的能力
 
-- 渐进式 MCP 工具面：先调用 `k8s.help`，再搜索带签名的能力 ID，只检查或读取选中的资源，写入必须经过明确的 plan/commit 边界。
+- 渐进式 MCP 工具面：先调用 `k8s.help`，再搜索紧凑且不透明的 `cap_` 能力句柄，只检查或读取选中的资源，写入必须经过明确的 plan/commit 边界。
 - 三种模式，以及独立的 scope、policy、超时、字节、列表、并发和按身份限流预算。
-- Secret 默认脱敏、有界 schema 展开、有界日志与 exec/attach、结构化安全审计事件、Prometheus 指标和可选告警。
+- list/watch 默认使用紧凑摘要，递归剔除 annotations 和 managedFields，并脱敏凭据特征注解；同时提供有界 schema、日志与 exec/attach 输出、结构化错误与安全审计事件、Prometheus 指标和可选告警。
 - Operator 自管共享 CA 并自动轮换服务端叶子证书，或使用经校验的同命名空间 `kubernetes.io/tls` Secret。
 
 ## 模式对比
@@ -58,7 +58,7 @@ sequenceDiagram
     S-->>C: 按模式的工具和 detailsRequest
     C->>S: k8s.search（查询，可选 name）
     S->>K: TokenReview，再做 SSAR/资源发现
-    S-->>C: 带签名的能力 ID
+    S-->>C: 紧凑的 cap_ 能力句柄
     C->>S: k8s.describe / k8s.read
     S->>K: 使用同一调用者 Token 的有界请求
     S-->>C: 有界结果和审计事件
@@ -70,7 +70,22 @@ sequenceDiagram
     S->>K: 复检后执行一次授权写入
 ```
 
-`k8s.help` 使用本地静态数据，但请求仍需通过认证、限流和审计。`k8s.describe` 会先定位精确 `fieldPath`，再展开 `$ref` schema，单次展开最多 10,000 个节点。列表请求每次最多向上游读取 8 个对象并保留 Kubernetes `continue` token。非 watch 的委派、discovery 和 OpenAPI 响应上限为 8 MiB。
+`k8s.help` 使用本地静态数据，但请求仍需通过认证、限流和审计。`k8s.search` 支持按 kind、resource、API group、version 和 action 精确过滤。`k8s.describe` 会沿 `$ref`、`allOf`、`oneOf` 和 `anyOf` 解析精确 `fieldPath`，再执行展开，单次最多 10,000 个节点。列表请求每次最多向上游读取 8 个对象并保留 Kubernetes `continue` token。非 watch 的委派、discovery 和 OpenAPI 响应上限为 8 MiB。
+
+### 紧凑读取输出
+
+`k8s.read` 的 list 和 watch 默认使用 `outputMode: summary`，get 默认使用 `full`。所有模式都会递归剔除 `metadata.annotations` 和 `metadata.managedFields`；只有显式传入 `omitAnnotations: false` 或 `omitManagedFields: false` 才会保留。即使显式返回 annotations，包含凭据特征的注解 key 或内部赋值仍会脱敏。重复行优先使用 `table`，只有确实需要完整对象时才使用 `full`；也可以通过 `fieldPaths` 从单个对象或每个列表项投影相同的对象相对路径：
+
+```json
+{
+  "capabilityId": "cap_example",
+  "namespace": "platform",
+  "outputMode": "summary",
+  "fieldPaths": ["metadata.name", "status.phase", "status.reason"]
+}
+```
+
+工具与 HTTP 错误统一为 `{ "code": "scope_denied", "message": "...", "retryable": false }`。进程内能力句柄未知时，不能直接重试原句柄，应重新调用 `k8s.search` 获取当前句柄。
 
 ## 架构
 
@@ -90,7 +105,7 @@ flowchart LR
 
 ```bash
 make install
-make deploy IMG=ghcr.io/your-org/supek8smcp:0.2.0
+make deploy IMG=ghcr.io/your-org/supek8smcp:0.3.0
 kubectl create namespace supek8smcp-servers
 ```
 
@@ -130,7 +145,7 @@ kubectl -n supek8smcp-servers get svc -l app.kubernetes.io/instance=team-readonl
 构建并发布不可变镜像，然后安装 CRD 和 Operator：
 
 ```bash
-export IMG=registry.example.com/platform/supek8smcp:0.2.0
+export IMG=registry.example.com/platform/supek8smcp:0.3.0
 make docker-build IMG="$IMG"
 docker push "$IMG"
 make install
@@ -152,7 +167,7 @@ make fmt
 make vet
 make test
 make build
-make docker-build IMG=ghcr.io/your-org/supek8smcp:0.2.0
+make docker-build IMG=ghcr.io/your-org/supek8smcp:0.3.0
 ```
 
 API 类型变更时使用 `make manifests`，审查生成的 YAML，不要手工修改。发布镜像应使用不可变 tag 或 digest，并通过仓库的 release 自动化发布。提交改动或报告漏洞前请阅读 [`CHANGELOG.md`](CHANGELOG.md)、[`CONTRIBUTING.md`](CONTRIBUTING.md) 和 [`SECURITY.md`](SECURITY.md)。
