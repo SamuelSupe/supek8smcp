@@ -17,6 +17,17 @@ import (
 
 const searchAuthorizationCheckLimit = 100
 
+type catalogSearchFilter struct {
+	Query         string
+	Action        string
+	ExactKind     string
+	ExactResource string
+	APIGroup      string
+	Version       string
+	Namespace     string
+	Name          string
+}
+
 type catalogCache struct {
 	mu        sync.Mutex
 	loadedAt  time.Time
@@ -148,6 +159,7 @@ func (c *catalogCache) list(ctx context.Context, principal *Principal) ([]Capabi
 		return left.Group+"/"+left.Version+"/"+left.Resource+"/"+left.Action < right.Group+"/"+right.Version+"/"+right.Resource+"/"+right.Action
 	})
 	if err == nil {
+		c.codec.retain(capabilities)
 		c.mu.Lock()
 		c.items = capabilities
 		c.loadedAt = time.Now()
@@ -189,17 +201,35 @@ func searchCatalog(
 	items []Capability,
 	policy *Policy,
 	principal *Principal,
-	query, wantedAction, namespace, name, cursor string,
+	filter catalogSearchFilter,
+	cursor string,
 	limit int64,
 ) ([]Capability, string, error) {
-	query = strings.ToLower(strings.TrimSpace(query))
+	query := strings.ToLower(strings.TrimSpace(filter.Query))
+	wantedAction := strings.TrimSpace(filter.Action)
+	wantedGroup := strings.TrimSpace(filter.APIGroup)
+	if strings.EqualFold(wantedGroup, "core") {
+		wantedGroup = ""
+	}
 	start, err := decodeCursor(cursor)
 	if err != nil {
 		return nil, "", err
 	}
 	var filtered []Capability
 	for _, capability := range items {
-		if wantedAction != "" && capability.Action != wantedAction && capability.Verb != wantedAction {
+		if wantedAction != "" && !strings.EqualFold(capability.Action, wantedAction) && !strings.EqualFold(capability.Verb, wantedAction) {
+			continue
+		}
+		if filter.ExactKind != "" && !strings.EqualFold(capability.Kind, strings.TrimSpace(filter.ExactKind)) {
+			continue
+		}
+		if filter.ExactResource != "" && !matchesExactResource(capability, strings.TrimSpace(filter.ExactResource)) {
+			continue
+		}
+		if filter.APIGroup != "" && !strings.EqualFold(capability.Group, wantedGroup) {
+			continue
+		}
+		if filter.Version != "" && !strings.EqualFold(capability.Version, strings.TrimSpace(filter.Version)) {
 			continue
 		}
 		haystack := strings.ToLower(strings.Join([]string{capability.Group, capability.Version, capability.Resource, capability.Kind, capability.Action, strings.Join(capability.Categories, " ")}, " "))
@@ -217,11 +247,11 @@ func searchCatalog(
 	for index < len(filtered) && int64(len(result)) < limit {
 		capability := filtered[index]
 		action := capability.AsAction()
-		targetNamespace := namespace
+		targetNamespace := filter.Namespace
 		if action.Namespaced && targetNamespace == "" && len(policy.config.Spec.Scope.Namespaces) > 0 {
 			targetNamespace = policy.config.Spec.Scope.Namespaces[0]
 		}
-		if err := policy.CheckTarget(action, targetNamespace, name); err != nil {
+		if err := policy.CheckTarget(action, targetNamespace, filter.Name); err != nil {
 			index++
 			continue
 		}
@@ -230,7 +260,7 @@ func searchCatalog(
 		}
 		authorizationChecks++
 		index++
-		if err := policy.Authorize(ctx, principal, action, targetNamespace, name); err != nil {
+		if err := policy.Authorize(ctx, principal, action, targetNamespace, filter.Name); err != nil {
 			continue
 		}
 		result = append(result, capability)
@@ -240,6 +270,13 @@ func searchCatalog(
 		next = encodeCursor(index)
 	}
 	return result, next, nil
+}
+
+func matchesExactResource(capability Capability, wanted string) bool {
+	if strings.EqualFold(capability.Resource, wanted) {
+		return true
+	}
+	return capability.Subresource != "" && strings.EqualFold(capability.Resource+"/"+capability.Subresource, wanted)
 }
 
 func encodeCursor(index int) string {

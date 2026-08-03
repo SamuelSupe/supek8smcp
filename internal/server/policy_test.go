@@ -1008,12 +1008,59 @@ func TestMCPCommitMissingConfirmationReturnsRequired(t *testing.T) {
 	if result == nil || !result.IsError {
 		t.Fatalf("CallTool(k8s.commit) result = %#v, want an error result", result)
 	}
-	data, err := json.Marshal(result)
-	if err != nil {
-		t.Fatalf("marshal k8s.commit error result: %v", err)
+	if len(result.Content) != 1 {
+		t.Fatalf("k8s.commit error content count = %d, want one structured text item", len(result.Content))
 	}
-	if !strings.Contains(string(data), "confirmation_required") {
-		t.Fatalf("k8s.commit missing confirmation result = %s, want confirmation_required", data)
+	content, ok := result.Content[0].(*mcp.TextContent)
+	if !ok {
+		t.Fatalf("k8s.commit error content type = %T, want *mcp.TextContent", result.Content[0])
+	}
+	var envelope toolErrorOutput
+	if err := json.Unmarshal([]byte(content.Text), &envelope); err != nil {
+		t.Fatalf("k8s.commit error payload = %s, want structured JSON: %v", content.Text, err)
+	}
+	if envelope.Code != "confirmation_required" || envelope.Message == "" || envelope.Retryable {
+		t.Fatalf("k8s.commit error envelope = %#v, want confirmation_required, message, retryable=false", envelope)
+	}
+}
+
+func TestMCPHelpErrorUsesStructuredPayload(t *testing.T) {
+	t.Parallel()
+
+	app := newAuditTestApp(slog.Default())
+	server := app.newMCPServer(&Principal{})
+	serverTransport, clientTransport := mcp.NewInMemoryTransports()
+	serverSession, err := server.Connect(context.Background(), serverTransport, nil)
+	if err != nil {
+		t.Fatalf("server.Connect() error = %v", err)
+	}
+	defer serverSession.Close()
+	client := mcp.NewClient(&mcp.Implementation{Name: "error-envelope-test-client", Version: "test"}, nil)
+	clientSession, err := client.Connect(context.Background(), clientTransport, nil)
+	if err != nil {
+		t.Fatalf("client.Connect() error = %v", err)
+	}
+	defer clientSession.Close()
+
+	result, err := clientSession.CallTool(context.Background(), &mcp.CallToolParams{
+		Name: toolHelp, Arguments: map[string]any{"tool": "k8s.not-a-tool"},
+	})
+	if err != nil {
+		t.Fatalf("CallTool(k8s.help) protocol error = %v", err)
+	}
+	if result == nil || !result.IsError || len(result.Content) != 1 {
+		t.Fatalf("CallTool(k8s.help) result = %#v, want one error content item", result)
+	}
+	content, ok := result.Content[0].(*mcp.TextContent)
+	if !ok {
+		t.Fatalf("k8s.help error content type = %T, want *mcp.TextContent", result.Content[0])
+	}
+	var envelope toolErrorOutput
+	if err := json.Unmarshal([]byte(content.Text), &envelope); err != nil {
+		t.Fatalf("k8s.help error payload = %q, want structured JSON: %v", content.Text, err)
+	}
+	if envelope.Code != "invalid_input" || envelope.Message == "" || envelope.Retryable {
+		t.Fatalf("k8s.help error envelope = %#v, want invalid_input, message, retryable=false", envelope)
 	}
 }
 
@@ -1176,11 +1223,171 @@ func TestRedactSecretHonorsSensitiveReadPolicy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Allow redactResult() error = %v", err)
 	}
-	if !reflect.DeepEqual(allowed, secret) {
-		t.Fatalf("Allow redactResult() = %#v, want original secret %#v", allowed, secret)
+	allowedAnnotations := allowed.(map[string]any)["metadata"].(map[string]any)["annotations"].(map[string]any)
+	if allowedAnnotations["kubectl.kubernetes.io/last-applied-configuration"] != "<redacted>" || allowedAnnotations["example.com/owner"] != "annotation-owner-marker" {
+		t.Fatalf("Allow redactResult() annotations = %#v, want sensitive assignment redacted and owner preserved", allowedAnnotations)
 	}
 	if _, err := redactResult(secret, action, mcpv1alpha1.SensitiveReadDeny); policyReason(err) != "sensitive_read_denied" {
 		t.Fatalf("deny secret error = %v, want sensitive_read_denied", err)
+	}
+}
+
+func TestReadOutputShapesAndMetadataControls(t *testing.T) {
+	t.Parallel()
+
+	listAction := policyTestAction("", "pods", "list", "list", true)
+	getAction := policyTestAction("", "pods", "get", "get", true)
+	object := map[string]any{
+		"apiVersion": "v1",
+		"kind":       "PodList",
+		"metadata": map[string]any{
+			"continue":        "next-page",
+			"resourceVersion": "42",
+			"managedFields":   []any{map[string]any{"manager": "controller"}},
+			"annotations": map[string]any{
+				"example.com/token": "top-secret",
+				"example.com/owner": "platform",
+				"example.com/key":   "key=top-level-secret",
+				"example.com/json":  `{"key":"top-level-json-secret"}`,
+			},
+		},
+		"items": []any{map[string]any{
+			"apiVersion": "v1",
+			"kind":       "Pod",
+			"metadata": map[string]any{
+				"name": "worker", "namespace": "workloads", "creationTimestamp": time.Now().UTC().Add(-2 * time.Minute).Format(time.RFC3339),
+				"managedFields": []any{map[string]any{"manager": "controller"}},
+				"annotations": map[string]any{
+					"example.com/token": "pod-secret", "example.com/owner": "platform",
+					"example.com/key": "key=pod-secret", "example.com/json": `{"key":"pod-json-secret"}`,
+				},
+			},
+			"spec": map[string]any{
+				"nodeName":   "node-a",
+				"containers": []any{map[string]any{"name": "worker"}},
+			},
+			"status": map[string]any{
+				"phase":             "Running",
+				"containerStatuses": []any{map[string]any{"ready": true, "restartCount": int64(2)}},
+			},
+		}},
+	}
+	redacted, err := redactResult(object, listAction, mcpv1alpha1.SensitiveReadAllow)
+	if err != nil {
+		t.Fatalf("redactResult() error = %v", err)
+	}
+	redactedObject := redacted.(map[string]any)
+	defaultOptions, err := normalizeReadOutputOptions(listAction, ReadInput{})
+	if err != nil {
+		t.Fatalf("normalizeReadOutputOptions(default list) error = %v", err)
+	}
+	if defaultOptions.mode != readOutputSummary || !defaultOptions.omitManagedFields || !defaultOptions.omitAnnotations {
+		t.Fatalf("default list output options = %#v, want summary and recursive metadata omission", defaultOptions)
+	}
+	defaultOutput, err := shapeReadOutput(redactedObject, listAction, defaultOptions)
+	if err != nil {
+		t.Fatalf("shapeReadOutput(default list) error = %v", err)
+	}
+	if _, ok := defaultOutput["items"].([]any); !ok {
+		t.Fatalf("default list output items = %#v, want summaries", defaultOutput["items"])
+	}
+	if _, ok := defaultOutput["metadata"].(map[string]any)["managedFields"]; ok {
+		t.Fatal("default list output retained top-level metadata.managedFields")
+	}
+	if _, ok := defaultOutput["metadata"].(map[string]any)["annotations"]; ok {
+		t.Fatal("default list output retained top-level metadata.annotations")
+	}
+	item := defaultOutput["items"].([]any)[0].(map[string]any)
+	for _, field := range []string{"spec", "status", "managedFields", "annotations"} {
+		if _, ok := item[field]; ok {
+			t.Fatalf("default Pod summary retained %q: %#v", field, item)
+		}
+	}
+	if item["name"] != "worker" || item["phase"] != "Running" || item["ready"] != "1/1" || item["restartCount"] != int64(2) {
+		t.Fatalf("default Pod summary = %#v, want name/phase/ready/restartCount", item)
+	}
+	defaultFullOptions, err := normalizeReadOutputOptions(getAction, ReadInput{OutputMode: readOutputFull})
+	if err != nil {
+		t.Fatalf("normalizeReadOutputOptions(default full) error = %v", err)
+	}
+	fullObject := redactedObject["items"].([]any)[0].(map[string]any)
+	defaultFullOutput, err := shapeReadOutput(fullObject, getAction, defaultFullOptions)
+	if err != nil {
+		t.Fatalf("shapeReadOutput(default full) error = %v", err)
+	}
+	defaultFullMetadata := defaultFullOutput["metadata"].(map[string]any)
+	if _, ok := defaultFullMetadata["managedFields"]; ok {
+		t.Fatal("default full output retained metadata.managedFields")
+	}
+	if _, ok := defaultFullMetadata["annotations"]; ok {
+		t.Fatal("default full output retained metadata.annotations")
+	}
+
+	tableOptions, err := normalizeReadOutputOptions(listAction, ReadInput{OutputMode: readOutputTable})
+	if err != nil {
+		t.Fatalf("normalizeReadOutputOptions(table) error = %v", err)
+	}
+	if _, err := normalizeReadOutputOptions(listAction, ReadInput{OutputMode: readOutputTable, FieldPaths: []string{"metadata.name"}}); policyReason(err) != "invalid_input" {
+		t.Fatalf("table with fieldPaths error = %v, want invalid_input", err)
+	}
+	tableOutput, err := shapeReadOutput(redactedObject, listAction, tableOptions)
+	if err != nil {
+		t.Fatalf("shapeReadOutput(table) error = %v", err)
+	}
+	columns, ok := tableOutput["columns"].([]string)
+	if !ok || len(columns) == 0 || columns[0] != "name" {
+		t.Fatalf("table columns = %#v, want stable Pod columns beginning with name", tableOutput["columns"])
+	}
+	rows, ok := tableOutput["rows"].([]any)
+	if !ok || len(rows) != 1 {
+		t.Fatalf("table rows = %#v, want one row", tableOutput["rows"])
+	}
+	if _, ok := tableOutput["metadata"].(map[string]any)["annotations"]; ok {
+		t.Fatal("table output retained annotations")
+	}
+
+	keep := false
+	fullOptions, err := normalizeReadOutputOptions(getAction, ReadInput{
+		OutputMode:        readOutputFull,
+		OmitManagedFields: &keep,
+		OmitAnnotations:   &keep,
+	})
+	if err != nil {
+		t.Fatalf("normalizeReadOutputOptions(full) error = %v", err)
+	}
+	fullOutput, err := shapeReadOutput(fullObject, getAction, fullOptions)
+	if err != nil {
+		t.Fatalf("shapeReadOutput(full) error = %v", err)
+	}
+	metadata := fullOutput["metadata"].(map[string]any)
+	if _, ok := metadata["managedFields"]; !ok {
+		t.Fatal("explicit omitManagedFields=false dropped metadata.managedFields")
+	}
+	annotations := metadata["annotations"].(map[string]any)
+	if annotations["example.com/token"] != "<redacted>" || annotations["example.com/key"] != "<redacted>" || annotations["example.com/json"] != "<redacted>" || annotations["example.com/owner"] != "platform" {
+		t.Fatalf("explicit annotations output = %#v, want token/key assignments redacted while metadata retained", annotations)
+	}
+
+	fieldOptions, err := normalizeReadOutputOptions(listAction, ReadInput{FieldPaths: []string{"metadata.name", "status.phase", "metadata.name"}})
+	if err != nil {
+		t.Fatalf("normalizeReadOutputOptions(fieldPaths) error = %v", err)
+	}
+	if len(fieldOptions.fieldPaths) != 2 {
+		t.Fatalf("deduplicated field paths = %#v, want two paths", fieldOptions.fieldPaths)
+	}
+	projected, err := shapeReadOutput(redactedObject, listAction, fieldOptions)
+	if err != nil {
+		t.Fatalf("shapeReadOutput(fieldPaths) error = %v", err)
+	}
+	projectedItem := projected["items"].([]any)[0].(map[string]any)
+	if projectedItem["metadata"].(map[string]any)["name"] != "worker" || projectedItem["status"].(map[string]any)["phase"] != "Running" {
+		t.Fatalf("projected item = %#v, want metadata.name and status.phase", projectedItem)
+	}
+	if _, ok := projectedItem["spec"]; ok {
+		t.Fatalf("fieldPaths projection retained unrequested spec: %#v", projectedItem)
+	}
+	if _, err := shapeReadOutput(redactedObject, listAction, readOutputOptions{mode: readOutputFull, fieldPaths: []string{"status.missing"}}); policyReason(err) != "field_path_not_found" {
+		t.Fatalf("missing field path error = %v, want field_path_not_found", err)
 	}
 }
 

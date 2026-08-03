@@ -2,6 +2,31 @@
 
 All notable changes to supek8smcp are documented here. This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) conventions. The repository currently records releases from v0.1.0 onward; no earlier version history is implied.
 
+## [0.3.0] - 2026-08-03
+
+### Added
+
+- `k8s.read` now supports `outputMode: summary | table | full`, object-relative `fieldPaths`, and explicit `omitManagedFields` / `omitAnnotations` controls. List and watch reads default to compact summaries; get reads remain full apart from the default metadata omissions.
+- Pod summaries expose the operational fields needed for triage: name, namespace, phase, ready containers, restart count, reason, node, and age. Workload, Event, Service, and metrics summaries retain their corresponding high-value status fields.
+- `k8s.search` now accepts exact `exactKind`, `exactResource`, `apiGroup`, and `version` filters in addition to the existing query and action filters.
+- Tool and HTTP errors now use the stable `{code, message, retryable}` shape so clients can distinguish stop, re-search, and retry decisions.
+
+### Changed
+
+- Capability IDs are compact, opaque, process-local `cap_` handles backed by the Server's capability map instead of signed JSON payloads. Clients must call `k8s.search` again when a handle is unknown after a Server restart.
+- `metadata.annotations` and `metadata.managedFields` are omitted recursively from `k8s.read` by default, including nested Pod template metadata. Callers must opt in explicitly when either field is required.
+- This is an intentional breaking read-contract change for list/watch callers that depended on full objects without selecting `outputMode: full`.
+
+### Fixed
+
+- `k8s.describe` field-path traversal now follows local `$ref`, `allOf`, `oneOf`, and `anyOf` branches, including paths such as `spec.template.spec.containers` in composed Deployment schemas.
+- Stateless `DELETE /mcp` cleanup requests now return `204 No Content` instead of producing harmless 404 session-close noise.
+
+### Security
+
+- Credential-like annotation keys and embedded assignments containing token, key, password, secret, API key, access key, private key, client secret, or credential markers are redacted even when annotations are explicitly requested.
+- Existing Secret and ServiceAccount token policies remain in force; the new metadata defaults reduce accidental model-context exposure for every Kubernetes resource kind.
+
 ## [0.2.0] - 2026-08-02
 
 ### Changed
@@ -48,6 +73,7 @@ All notable changes to supek8smcp are documented here. This project follows [Kee
 
 - No OAuth, port-forward, `cp`, proxy, evict, drain, TTY, JSON-RPC batch, multi-cluster routing, or multi-replica Server support.
 
+[0.3.0]: https://github.com/SamuelSupe/supek8smcp/releases/tag/v0.3.0
 [0.2.0]: https://github.com/SamuelSupe/supek8smcp/releases/tag/v0.2.0
 [0.1.1]: https://github.com/SamuelSupe/supek8smcp/releases/tag/v0.1.1
 [0.1.0]: https://github.com/samuelsupe/supek8smcp/releases/tag/v0.1.0

@@ -1,6 +1,7 @@
 package server
 
 import (
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -18,6 +19,20 @@ func TestPrepareMCPRequestBodyRejectsWhitespacePrefixedBatch(t *testing.T) {
 	}
 	if writer.Code != http.StatusBadRequest {
 		t.Fatalf("prepareMCPRequestBody() status = %d, want %d", writer.Code, http.StatusBadRequest)
+	}
+	if got := writer.Header().Get("Content-Type"); got != "application/json" {
+		t.Fatalf("prepareMCPRequestBody() content type = %q, want application/json", got)
+	}
+	var payload struct {
+		Code      string `json:"code"`
+		Message   string `json:"message"`
+		Retryable bool   `json:"retryable"`
+	}
+	if err := json.Unmarshal(writer.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("prepareMCPRequestBody() error body = %q, want structured JSON: %v", writer.Body.String(), err)
+	}
+	if payload.Code != "invalid_request" || payload.Message != "JSON-RPC batches are not supported" || payload.Retryable {
+		t.Fatalf("prepareMCPRequestBody() error payload = %#v, want invalid_request/message/retryable=false", payload)
 	}
 }
 
@@ -50,5 +65,42 @@ func TestPrepareMCPRequestBodyMapsMaxBytesErrorTo413(t *testing.T) {
 	}
 	if writer.Code != http.StatusRequestEntityTooLarge {
 		t.Fatalf("prepareMCPRequestBody() status = %d, want %d", writer.Code, http.StatusRequestEntityTooLarge)
+	}
+	var payload struct {
+		Code      string `json:"code"`
+		Message   string `json:"message"`
+		Retryable bool   `json:"retryable"`
+	}
+	if err := json.Unmarshal(writer.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("prepareMCPRequestBody() oversized error body = %q, want structured JSON: %v", writer.Body.String(), err)
+	}
+	if payload.Code != "request_too_large" || payload.Message == "" || payload.Retryable {
+		t.Fatalf("prepareMCPRequestBody() oversized error payload = %#v, want request_too_large/message/retryable=false", payload)
+	}
+}
+
+func TestServeStatelessSessionCloseReturnsNoContent(t *testing.T) {
+	t.Parallel()
+
+	for _, sessionID := range []string{"", "stateless-session"} {
+		request := httptest.NewRequest(http.MethodDelete, "/mcp", nil)
+		if sessionID != "" {
+			request.Header.Set("Mcp-Session-Id", sessionID)
+		}
+		writer := httptest.NewRecorder()
+		if !serveStatelessSessionClose(writer, request) {
+			t.Fatalf("serveStatelessSessionClose() did not handle DELETE (sessionID=%q)", sessionID)
+		}
+		if writer.Code != http.StatusNoContent {
+			t.Fatalf("serveStatelessSessionClose() status = %d, want %d (sessionID=%q)", writer.Code, http.StatusNoContent, sessionID)
+		}
+		if writer.Body.Len() != 0 {
+			t.Fatalf("serveStatelessSessionClose() body = %q, want empty (sessionID=%q)", writer.Body.String(), sessionID)
+		}
+	}
+
+	post := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader("{}"))
+	if serveStatelessSessionClose(httptest.NewRecorder(), post) {
+		t.Fatal("serveStatelessSessionClose() handled non-DELETE request")
 	}
 }

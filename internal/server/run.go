@@ -124,14 +124,22 @@ func (a *App) Serve(ctx context.Context, opts Options) error {
 	}, &mcp.StreamableHTTPOptions{Stateless: true, Logger: a.logger})
 
 	mcpMux := http.NewServeMux()
-	mcpMux.Handle("/mcp", a.authenticationMiddleware(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+	authenticatedMCP := a.authenticationMiddleware(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		request.Body = http.MaxBytesReader(writer, request.Body, a.config.Spec.Limits.MaxInputBytes)
 		if !prepareMCPRequestBody(writer, request) {
 			return
 		}
 		mcpTransport.ServeHTTP(writer, request)
-	})))
-	mcpMux.HandleFunc("/", func(writer http.ResponseWriter, _ *http.Request) { http.NotFound(writer, nil) })
+	}))
+	mcpMux.HandleFunc("/mcp", func(writer http.ResponseWriter, request *http.Request) {
+		if serveStatelessSessionClose(writer, request) {
+			return
+		}
+		authenticatedMCP.ServeHTTP(writer, request)
+	})
+	mcpMux.HandleFunc("/", func(writer http.ResponseWriter, _ *http.Request) {
+		writeStructuredHTTPError(writer, http.StatusNotFound, "not_found", "endpoint not found", false)
+	})
 
 	metricsMux := http.NewServeMux()
 	metricsMux.Handle("/metrics", promhttp.HandlerFor(a.registry, promhttp.HandlerOpts{}))
@@ -177,6 +185,7 @@ func (a *App) Serve(ctx context.Context, opts Options) error {
 
 func (a *App) newMCPServer(principal *Principal) *mcp.Server {
 	server := mcp.NewServer(&mcp.Implementation{Name: "supek8smcp", Version: a.version}, &mcp.ServerOptions{})
+	server.AddReceivingMiddleware(structuredToolErrorMiddleware)
 	readOnly := true
 	closedWorld := false
 	mcp.AddTool(server, &mcp.Tool{
@@ -191,7 +200,7 @@ func (a *App) newMCPServer(principal *Principal) *mcp.Server {
 	})
 	mcp.AddTool(server, &mcp.Tool{
 		Name: toolSearch, Title: "Search Kubernetes capabilities",
-		Description: "Search API resources and actions that are both within this MCP server policy and authorized by the caller's Kubernetes RBAC.",
+		Description: "Search API resources and actions with optional exact kind/resource/group/version filters; results are within server policy and caller RBAC and use compact cap_ handles.",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: &closedWorld},
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, input SearchInput) (*mcp.CallToolResult, SearchOutput, error) {
 		started := time.Now()
@@ -212,7 +221,7 @@ func (a *App) newMCPServer(principal *Principal) *mcp.Server {
 	})
 	mcp.AddTool(server, &mcp.Tool{
 		Name: toolRead, Title: "Read Kubernetes resource",
-		Description: "Run an authorized get, list, watch, or Pod log capability with bounded output.",
+		Description: "Run an authorized get, list, watch, or Pod log capability with bounded summary, table, projected, or full output; annotations and managedFields are omitted by default.",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: &readOnly},
 	}, func(ctx context.Context, request *mcp.CallToolRequest, input ReadInput) (*mcp.CallToolResult, map[string]any, error) {
 		started := time.Now()

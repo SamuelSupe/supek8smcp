@@ -134,6 +134,12 @@ annotation 值都会脱敏，防止 `kubectl.kubernetes.io/last-applied-configur
 网络和审计范围。不要把 Secret 值、Bearer Token、TLS 私钥或 exec 输出写入日志、
 MCP 客户端配置或 issue。
 
+对所有资源类型，`k8s.read` 默认递归剔除 `metadata.annotations` 和
+`metadata.managedFields`。调用者即使显式设置 `omitAnnotations: false`，注解名称或
+内部赋值只要含有 token、password、secret、API key、access key、private key、
+client secret、credential 等凭据特征，也会替换为 `<redacted>`。在此保护上线前
+已经暴露的凭据必须轮换；响应脱敏无法撤销已经泄露的值。
+
 ## 认证、授权与审计
 
 - 使用 HTTPS；客户端必须校验 CA 和服务端名称。默认 Operator 自管 CA/叶子
@@ -165,8 +171,9 @@ Operator 生成的 Server 配置也会保留这些值；部署后应检查 `<nam
 ConfigMap 中的实际值。对高风险场景，进一步降低 `maxOutputBytes`、`maxListItems`、
 `maxConcurrent`、`requestsPerMinute` 和 `burst`。
 
-Kubernetes 资源 `list` 会把单次上游分页进一步限制为 8 项，并原样返回
-Kubernetes `continue` token；调用方应使用 `cursor` 渐进读取后续页。委派动态
+Kubernetes 资源 `list` 默认使用 `outputMode: summary`，把单次上游分页进一步限制为
+8 项，并原样返回 Kubernetes `continue` token；调用方应使用 `cursor` 渐进读取后续页。
+`table` 可进一步减少重复字段名，`fieldPaths` 只投影指定的对象相对路径。委派动态
 客户端还会拒绝超过 8 MiB 的非 watch 资源、discovery 或 OpenAPI 响应，避免在
 输出裁剪前因大型列表或聚合 API 响应耗尽 Server 内存。watch 继续由
 `streamTimeout`、`maxListItems` 和 `maxOutputBytes` 约束。
@@ -191,9 +198,9 @@ TokenReview 的出站连通性依赖集群的其他网络策略。若通过入�
 匿名端点。
 
 Service 固定为 `ClusterIP`，每个 CR 只有一个 Server 副本。Deployment 使用
-`Recreate` 更新：能力签名和 plan 都是 Pod 本地状态，禁止新旧 revision 重叠可避免
+`Recreate` 更新：紧凑能力句柄和 plan 都是 Pod 本地状态，禁止新旧 revision 重叠可避免
 `search` 后 capability 失效、`plan` 后 commit 丢失，以及收紧策略时旧 revision
-继续接流量。Service 只选择由当前 CR UID/generation、Server 镜像、配置和 TLS
+继续接流量。Server 重启或返回 `invalid_capability` 后，客户端必须重新 search。Service 只选择由当前 CR UID/generation、Server 镜像、配置和 TLS
 材料共同确定的 Pod revision；任何认证、证书、配置或资源调谐失败都会把 Service
 切到无后端 revision，并把现有 Server
 Deployment 缩容为零。修复失败原因并成功完成整轮调谐前，旧策略不会重新接流量。
