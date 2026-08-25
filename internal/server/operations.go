@@ -70,7 +70,7 @@ func (a *App) plan(ctx context.Context, principal *Principal, input PlanInput) (
 	if input.Force && a.config.Spec.Mode != mcpv1alpha1.ModeDangerous {
 		return PlanOutput{}, policyError("mode_denied", "force apply requires Dangerous mode")
 	}
-	if err := a.policy.CheckAndAuthorize(ctx, principal, action, namespace, name); err != nil {
+	if err := a.policy.CheckAndAuthorizeOperation(ctx, principal, action, namespace, name); err != nil {
 		return PlanOutput{}, err
 	}
 	if a.config.Spec.Mode == mcpv1alpha1.ModeSafeWrite {
@@ -125,7 +125,7 @@ func (a *App) commit(ctx context.Context, request *mcp.CallToolRequest, principa
 	if operation.Generation != a.config.Generation {
 		return output, policyError("stale_plan", "server policy changed after the plan was created")
 	}
-	if err := a.policy.CheckAndAuthorize(ctx, principal, operation.Action, operation.Namespace, operation.Name); err != nil {
+	if err := a.policy.CheckAndAuthorizeOperation(ctx, principal, operation.Action, operation.Namespace, operation.Name); err != nil {
 		return output, err
 	}
 	if err := a.checkOperationPreconditions(ctx, principal, operation); err != nil {
@@ -137,15 +137,20 @@ func (a *App) commit(ctx context.Context, request *mcp.CallToolRequest, principa
 			return output, err
 		}
 	}
-	result, err := a.executeOperation(ctx, request, principal, operation)
-	if err != nil {
-		return output, err
+	result, executionErr := a.executeOperation(ctx, request, principal, operation)
+	if result != nil {
+		redacted, err := redactResult(result, operation.Action, a.config.Spec.Policy.SensitiveReads)
+		if err != nil {
+			return output, err
+		}
+		output.Result = boundedValue(redacted, a.config.Spec.Limits.MaxOutputBytes/2)
 	}
-	redacted, err := redactResult(result, operation.Action, a.config.Spec.Policy.SensitiveReads)
-	if err != nil {
-		return output, err
+	if executionErr != nil {
+		if output.Result != nil {
+			return output, errorWithDetails(executionErr, output)
+		}
+		return output, executionErr
 	}
-	output.Result = boundedValue(redacted, a.config.Spec.Limits.MaxOutputBytes/2)
 	return output, nil
 }
 
@@ -285,14 +290,16 @@ func (a *App) previewOperation(ctx context.Context, principal *Principal, operat
 		}
 		operation.TargetUID = string(pod.UID)
 		operation.ResourceVersion = pod.ResourceVersion
-		if err := validateContainer(pod, operation.Container); err != nil {
+		container, err := resolveContainer(pod, operation.Container)
+		if err != nil {
 			return nil, nil, err
 		}
+		operation.Container = container
 		if action.Action == "exec" && len(operation.Command) == 0 {
 			return nil, nil, policyError("invalid_input", "command is required for exec")
 		}
 		preview = map[string]any{
-			"pod": operation.Name, "uid": pod.UID, "container": selectedContainer(pod, operation.Container),
+			"pod": operation.Name, "uid": pod.UID, "container": operation.Container,
 			"command": operation.Command, "stdinBytes": len(operation.Stdin), "tty": false,
 		}
 		warnings = append(warnings, "remote execution cannot be server-side dry-run; commit will open the stream after rechecking the Pod UID and RBAC")

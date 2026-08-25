@@ -25,6 +25,22 @@ type toolErrorOutput struct {
 	Code      string `json:"code"`
 	Message   string `json:"message"`
 	Retryable bool   `json:"retryable"`
+	Details   any    `json:"details,omitempty"`
+}
+
+type toolErrorWithDetails struct {
+	cause   error
+	details any
+}
+
+func (e *toolErrorWithDetails) Error() string { return e.cause.Error() }
+func (e *toolErrorWithDetails) Unwrap() error { return e.cause }
+
+func errorWithDetails(err error, details any) error {
+	if err == nil || details == nil {
+		return err
+	}
+	return &toolErrorWithDetails{cause: err, details: details}
 }
 
 func structuredToolErrorMiddleware(next mcp.MethodHandler) mcp.MethodHandler {
@@ -51,6 +67,12 @@ func structuredToolErrorMiddleware(next mcp.MethodHandler) mcp.MethodHandler {
 func normalizeToolError(err error) toolErrorOutput {
 	if err == nil {
 		return toolErrorOutput{Code: "tool_error", Message: "tool call failed", Retryable: false}
+	}
+	var detailed *toolErrorWithDetails
+	if errors.As(err, &detailed) {
+		output := normalizeToolError(detailed.cause)
+		output.Details = detailed.details
+		return output
 	}
 	var typed *toolError
 	if errors.As(err, &typed) {

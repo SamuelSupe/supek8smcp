@@ -79,6 +79,27 @@ func TestPrepareMCPRequestBodyMapsMaxBytesErrorTo413(t *testing.T) {
 	}
 }
 
+func TestPrepareMCPRequestBodyMapsObjectOverLimitToStructured413(t *testing.T) {
+	t.Parallel()
+
+	request := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"`+strings.Repeat("x", 64)+`"}`))
+	writer := httptest.NewRecorder()
+	request.Body = http.MaxBytesReader(writer, request.Body, 16)
+	if prepareMCPRequestBody(writer, request) {
+		t.Fatal("prepareMCPRequestBody() accepted an over-limit JSON object")
+	}
+	if writer.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("prepareMCPRequestBody() status = %d, want %d", writer.Code, http.StatusRequestEntityTooLarge)
+	}
+	var payload toolErrorOutput
+	if err := json.Unmarshal(writer.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("prepareMCPRequestBody() object oversize body = %q, want structured JSON: %v", writer.Body.String(), err)
+	}
+	if payload.Code != "request_too_large" || payload.Message == "" || payload.Retryable {
+		t.Fatalf("prepareMCPRequestBody() object oversize payload = %#v, want request_too_large/message/retryable=false", payload)
+	}
+}
+
 func TestServeStatelessSessionCloseReturnsNoContent(t *testing.T) {
 	t.Parallel()
 

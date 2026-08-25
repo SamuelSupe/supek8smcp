@@ -30,6 +30,7 @@ type catalogSearchFilter struct {
 
 type catalogCache struct {
 	mu        sync.Mutex
+	refreshMu sync.Mutex
 	loadedAt  time.Time
 	items     []Capability
 	cacheTime time.Duration
@@ -49,6 +50,18 @@ func (c *catalogCache) list(ctx context.Context, principal *Principal) ([]Capabi
 	}
 	stale := append([]Capability(nil), c.items...)
 	c.mu.Unlock()
+
+	c.refreshMu.Lock()
+	defer c.refreshMu.Unlock()
+	c.mu.Lock()
+	if time.Since(c.loadedAt) < c.cacheTime && len(c.items) > 0 {
+		items := append([]Capability(nil), c.items...)
+		c.mu.Unlock()
+		return items, nil
+	}
+	stale = append([]Capability(nil), c.items...)
+	c.mu.Unlock()
+
 	groups, discovered, err := principal.Discovery.ServerGroupsAndResources()
 	resources := preferredResourceLists(groups, discovered)
 	if err != nil {
@@ -159,8 +172,11 @@ func (c *catalogCache) list(ctx context.Context, principal *Principal) ([]Capabi
 		return left.Group+"/"+left.Version+"/"+left.Resource+"/"+left.Action < right.Group+"/"+right.Version+"/"+right.Resource+"/"+right.Action
 	})
 	if err == nil {
-		c.codec.retain(capabilities)
 		c.mu.Lock()
+		retained := make([]Capability, 0, len(capabilities)+len(c.items))
+		retained = append(retained, capabilities...)
+		retained = append(retained, c.items...)
+		c.codec.retain(retained)
 		c.items = capabilities
 		c.loadedAt = time.Now()
 		c.mu.Unlock()
@@ -251,16 +267,12 @@ func searchCatalog(
 		if action.Namespaced && targetNamespace == "" && len(policy.config.Spec.Scope.Namespaces) > 0 {
 			targetNamespace = policy.config.Spec.Scope.Namespaces[0]
 		}
-		if err := policy.CheckTarget(action, targetNamespace, filter.Name); err != nil {
-			index++
-			continue
-		}
 		if authorizationChecks >= searchAuthorizationCheckLimit {
 			break
 		}
 		authorizationChecks++
 		index++
-		if err := policy.Authorize(ctx, principal, action, targetNamespace, filter.Name); err != nil {
+		if err := policy.CheckAndAuthorizeOperation(ctx, principal, action, targetNamespace, filter.Name); err != nil {
 			continue
 		}
 		result = append(result, capability)

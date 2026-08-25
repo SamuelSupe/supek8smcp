@@ -149,6 +149,9 @@ func summarizeKubernetesObject(object map[string]any, fallbackKind string) map[s
 	output := map[string]any{
 		"name": scalarString(metadata["name"]), "namespace": scalarString(metadata["namespace"]), "kind": kind,
 	}
+	if resourceVersion := scalarString(metadata["resourceVersion"]); resourceVersion != "" {
+		output["resourceVersion"] = resourceVersion
+	}
 	if apiVersion := scalarString(object["apiVersion"]); apiVersion != "" {
 		output["apiVersion"] = apiVersion
 	}

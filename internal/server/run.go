@@ -144,7 +144,13 @@ func (a *App) Serve(ctx context.Context, opts Options) error {
 	metricsMux := http.NewServeMux()
 	metricsMux.Handle("/metrics", promhttp.HandlerFor(a.registry, promhttp.HandlerOpts{}))
 	metricsMux.HandleFunc("/healthz", func(writer http.ResponseWriter, _ *http.Request) { writer.WriteHeader(http.StatusOK) })
-	metricsMux.HandleFunc("/readyz", func(writer http.ResponseWriter, _ *http.Request) { writer.WriteHeader(http.StatusOK) })
+	metricsMux.HandleFunc("/readyz", func(writer http.ResponseWriter, request *http.Request) {
+		if err := a.authenticator.Ready(request.Context()); err != nil {
+			writeStructuredHTTPError(writer, http.StatusServiceUnavailable, "tokenreview_unavailable", "delegated authentication is unavailable", true)
+			return
+		}
+		writer.WriteHeader(http.StatusOK)
+	})
 
 	mcpHTTP := &http.Server{
 		Addr: opts.ListenAddress, Handler: mcpMux,

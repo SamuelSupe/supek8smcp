@@ -5,11 +5,14 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/runtime"
+	watchapi "k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/dynamic"
 
 	mcpv1alpha1 "github.com/samuelsupe/supek8smcp/api/v1alpha1"
@@ -101,6 +104,7 @@ type ReadInput struct {
 	LabelSelector     string   `json:"labelSelector,omitempty"`
 	FieldSelector     string   `json:"fieldSelector,omitempty"`
 	Cursor            string   `json:"cursor,omitempty" jsonschema:"Kubernetes list continue token"`
+	ResourceVersion   string   `json:"resourceVersion,omitempty" jsonschema:"Kubernetes resourceVersion used to resume a watch"`
 	Limit             int64    `json:"limit,omitempty"`
 	OutputMode        string   `json:"outputMode,omitempty" jsonschema:"response shape: summary, table, or full; list and watch default to summary while get defaults to full"`
 	OmitManagedFields *bool    `json:"omitManagedFields,omitempty" jsonschema:"omit metadata.managedFields recursively; defaults to true"`
@@ -136,6 +140,28 @@ func (a *App) read(ctx context.Context, request *mcp.CallToolRequest, principal 
 	namespace := a.defaultNamespace(capability, input.Namespace)
 	if err := a.policy.CheckAndAuthorize(ctx, principal, action, namespace, input.Name); err != nil {
 		return nil, err
+	}
+	if action.Action == "logs" && input.Name == "" {
+		return nil, policyError("invalid_input", "name is required for logs")
+	}
+	if action.Action == "logs" && input.Container == "" {
+		if err := a.policy.CheckAndAuthorize(ctx, principal, prerequisiteGetAction(action), namespace, input.Name); err != nil {
+			return nil, err
+		}
+		pod, err := principal.Kubernetes.CoreV1().Pods(namespace).Get(ctx, input.Name, metav1.GetOptions{})
+		if err != nil {
+			return nil, err
+		}
+		input.Container, err = resolveContainer(pod, "")
+		if err != nil {
+			return nil, err
+		}
+	}
+	if (action.Action == "list" || action.Action == "watch") && input.Name != "" {
+		input.FieldSelector, err = namedFieldSelector(input.FieldSelector, input.Name)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	var result map[string]any
@@ -189,11 +215,29 @@ func (a *App) kubernetesListLimit(requested int64) int64 {
 	return min(requested, kubernetesListPageLimit)
 }
 
+func namedFieldSelector(raw, name string) (string, error) {
+	selector, err := fields.ParseSelector(raw)
+	if err != nil {
+		return "", policyError("invalid_input", "fieldSelector is not valid")
+	}
+	if selector.Empty() {
+		return fields.OneTermEqualSelector("metadata.name", name).String(), nil
+	}
+	if selectedName, exact := selector.RequiresExactMatch("metadata.name"); exact {
+		if selectedName != name {
+			return "", policyError("invalid_input", "fieldSelector metadata.name must match name")
+		}
+		return selector.String(), nil
+	}
+	return fields.AndSelectors(selector, fields.OneTermEqualSelector("metadata.name", name)).String(), nil
+}
+
 func (a *App) watch(ctx context.Context, request *mcp.CallToolRequest, principal *Principal, action Action, namespace string, input ReadInput, outputOptions readOutputOptions) (map[string]any, error) {
 	streamCtx, cancel := context.WithTimeout(ctx, a.config.Spec.Limits.StreamTimeout.Duration)
 	defer cancel()
 	watcher, err := dynamicResource(principal, action, namespace).Watch(streamCtx, metav1.ListOptions{
 		LabelSelector: input.LabelSelector, FieldSelector: input.FieldSelector,
+		ResourceVersion: input.ResourceVersion, AllowWatchBookmarks: true,
 	})
 	if err != nil {
 		return nil, err
@@ -201,37 +245,70 @@ func (a *App) watch(ctx context.Context, request *mcp.CallToolRequest, principal
 	defer watcher.Stop()
 	items := make([]any, 0)
 	var outputBytes int64
+	lastResourceVersion := input.ResourceVersion
 	for len(items) < int(a.config.Spec.Limits.MaxListItems) {
 		select {
 		case <-streamCtx.Done():
-			return map[string]any{"events": items, "ended": streamCtx.Err().Error()}, nil
+			return watchResult(items, streamCtx.Err().Error(), lastResourceVersion, false), nil
 		case event, ok := <-watcher.ResultChan():
 			if !ok {
-				return map[string]any{"events": items, "ended": "watch closed"}, nil
+				return watchResult(items, "watch closed", lastResourceVersion, false), nil
 			}
 			object, err := runtime.DefaultUnstructuredConverter.ToUnstructured(event.Object)
 			if err != nil {
 				object = map[string]any{"error": err.Error()}
 			}
+			eventResourceVersion := kubernetesObjectResourceVersion(object)
+			if eventResourceVersion != "" {
+				lastResourceVersion = eventResourceVersion
+			}
 			redacted, err := redactResult(object, action, a.config.Spec.Policy.SensitiveReads)
 			if err != nil {
 				return nil, err
 			}
-			shaped, err := shapeReadOutput(redacted, action, outputOptions)
-			if err != nil {
-				return nil, err
+			var shaped map[string]any
+			if event.Type == watchapi.Error {
+				cleaned := cleanKubernetesValue(redacted, outputOptions, false)
+				shaped, _ = cleaned.(map[string]any)
+				if shaped == nil {
+					shaped = map[string]any{"error": "Kubernetes watch returned an invalid Status object"}
+				}
+			} else {
+				shaped, err = shapeReadOutput(redacted, action, outputOptions)
+				if err != nil {
+					return nil, err
+				}
 			}
 			entry := map[string]any{"type": string(event.Type), "object": shaped}
+			if eventResourceVersion != "" {
+				entry["resourceVersion"] = eventResourceVersion
+			}
 			entryData, _ := json.Marshal(entry)
 			if outputBytes+int64(len(entryData)) > a.config.Spec.Limits.MaxOutputBytes {
-				return map[string]any{"events": items, "ended": "output limit reached", "truncated": true}, nil
+				return watchResult(items, "output limit reached", lastResourceVersion, true), nil
 			}
 			outputBytes += int64(len(entryData))
 			items = append(items, entry)
 			notifyProgress(ctx, request, float64(len(items)), 0, compactProgress(entry, 4096))
 		}
 	}
-	return map[string]any{"events": items, "ended": "item limit reached"}, nil
+	return watchResult(items, "item limit reached", lastResourceVersion, false), nil
+}
+
+func watchResult(events []any, ended, resourceVersion string, truncated bool) map[string]any {
+	result := map[string]any{"events": events, "ended": ended}
+	if resourceVersion != "" {
+		result["resourceVersion"] = resourceVersion
+	}
+	if truncated {
+		result["truncated"] = true
+	}
+	return result
+}
+
+func kubernetesObjectResourceVersion(object map[string]any) string {
+	metadata, _ := object["metadata"].(map[string]any)
+	return scalarString(metadata["resourceVersion"])
 }
 
 func (a *App) logs(ctx context.Context, request *mcp.CallToolRequest, principal *Principal, namespace string, input ReadInput) (map[string]any, error) {
@@ -264,27 +341,46 @@ func (a *App) logs(ctx context.Context, request *mcp.CallToolRequest, principal 
 		return nil, err
 	}
 	defer reader.Close()
-	scanner := bufio.NewScanner(io.LimitReader(reader, a.config.Spec.Limits.MaxOutputBytes+1))
-	buffer := make([]byte, 0, min(a.config.Spec.Limits.MaxOutputBytes, 64<<10))
-	scanner.Buffer(buffer, int(min(a.config.Spec.Limits.MaxOutputBytes, 1<<20)))
+	buffered := bufio.NewReaderSize(
+		io.LimitReader(reader, a.config.Spec.Limits.MaxOutputBytes+1),
+		int(min(a.config.Spec.Limits.MaxOutputBytes, 64<<10)),
+	)
 	var lines []string
 	var size int64
-	for scanner.Scan() {
-		if int64(len(lines)) >= a.config.Spec.Limits.MaxListItems {
-			return map[string]any{"logs": lines, "truncated": true}, nil
+	for {
+		raw, readErr := buffered.ReadString('\n')
+		if raw != "" {
+			if int64(len(lines)) >= a.config.Spec.Limits.MaxListItems {
+				return map[string]any{"logs": lines, "truncated": true}, nil
+			}
+			remaining := a.config.Spec.Limits.MaxOutputBytes - size
+			if int64(len(raw)) > remaining {
+				if remaining > 0 {
+					line := normalizeLogLine(raw[:remaining])
+					lines = append(lines, line)
+					notifyProgress(ctx, request, float64(len(lines)), 0, compactProgress(line, 4096))
+				}
+				return map[string]any{"logs": lines, "truncated": true}, nil
+			}
+			size += int64(len(raw))
+			line := normalizeLogLine(raw)
+			lines = append(lines, line)
+			notifyProgress(ctx, request, float64(len(lines)), 0, compactProgress(line, 4096))
 		}
-		line := scanner.Text()
-		size += int64(len(line) + 1)
-		if size > a.config.Spec.Limits.MaxOutputBytes {
-			return map[string]any{"logs": lines, "truncated": true}, nil
+		switch {
+		case readErr == nil:
+			continue
+		case readErr == io.EOF, readErr == context.Canceled, readErr == context.DeadlineExceeded:
+			return map[string]any{"logs": lines, "truncated": false}, nil
+		default:
+			return nil, readErr
 		}
-		lines = append(lines, line)
-		notifyProgress(ctx, request, float64(len(lines)), 0, line)
 	}
-	if err := scanner.Err(); err != nil && err != context.Canceled && err != context.DeadlineExceeded {
-		return nil, err
-	}
-	return map[string]any{"logs": lines, "truncated": false}, nil
+}
+
+func normalizeLogLine(line string) string {
+	line = strings.TrimSuffix(line, "\n")
+	return strings.TrimSuffix(line, "\r")
 }
 
 func dynamicResource(principal *Principal, action Action, namespace string) dynamic.ResourceInterface {

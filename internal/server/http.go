@@ -1,7 +1,6 @@
 package server
 
 import (
-	"bufio"
 	"bytes"
 	"errors"
 	"io"
@@ -18,40 +17,26 @@ func prepareMCPRequestBody(writer http.ResponseWriter, request *http.Request) bo
 		return true
 	}
 	original := request.Body
-	buffered := bufio.NewReader(original)
-	discarded := int64(0)
-	for {
-		first, err := buffered.ReadByte()
-		if err != nil {
-			request.Body = &requestBody{Reader: buffered, Closer: original}
-			if request.ContentLength >= 0 {
-				request.ContentLength = max(0, request.ContentLength-discarded)
-			}
-			var tooLarge *http.MaxBytesError
-			if errors.As(err, &tooLarge) {
-				writeStructuredHTTPError(writer, http.StatusRequestEntityTooLarge, "request_too_large", "MCP request body exceeds maxInputBytes", false)
-				return false
-			}
-			if !errors.Is(err, io.EOF) {
-				writeStructuredHTTPError(writer, http.StatusBadRequest, "invalid_request", "cannot read MCP request body", false)
-				return false
-			}
-			return true
-		}
-		if first == ' ' || first == '\t' || first == '\r' || first == '\n' {
-			discarded++
-			continue
-		}
-		request.Body = &requestBody{Reader: io.MultiReader(bytes.NewReader([]byte{first}), buffered), Closer: original}
-		if request.ContentLength >= 0 {
-			request.ContentLength = max(0, request.ContentLength-discarded)
-		}
-		if first == '[' {
-			writeStructuredHTTPError(writer, http.StatusBadRequest, "invalid_request", "JSON-RPC batches are not supported", false)
+	data, err := io.ReadAll(original)
+	if err != nil {
+		_ = original.Close()
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeStructuredHTTPError(writer, http.StatusRequestEntityTooLarge, "request_too_large", "MCP request body exceeds maxInputBytes", false)
 			return false
 		}
-		return true
+		writeStructuredHTTPError(writer, http.StatusBadRequest, "invalid_request", "cannot read MCP request body", false)
+		return false
 	}
+	trimmed := bytes.TrimLeft(data, " \t\r\n")
+	if len(trimmed) > 0 && trimmed[0] == '[' {
+		_ = original.Close()
+		writeStructuredHTTPError(writer, http.StatusBadRequest, "invalid_request", "JSON-RPC batches are not supported", false)
+		return false
+	}
+	request.Body = &requestBody{Reader: bytes.NewReader(data), Closer: original}
+	request.ContentLength = int64(len(data))
+	return true
 }
 
 func serveStatelessSessionClose(writer http.ResponseWriter, request *http.Request) bool {

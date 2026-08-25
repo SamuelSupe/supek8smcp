@@ -9,6 +9,9 @@ OPERATOR_NAMESPACE="supek8smcp-e2e-operator-${RUN_ID}"
 IMAGE="supek8smcp:e2e-${RUN_ID}"
 TMP_DIR="$(mktemp -d)"
 CRD_NAME="kubernetesmcpservers.mcp.supek8smcp.io"
+LOCK_NAMESPACE="kube-system"
+LOCK_NAME="supek8smcp-e2e-lock"
+LOCK_ACQUIRED=0
 CRD_CREATED=0
 TOKEN_REVIEWER_CREATED=0
 
@@ -32,6 +35,12 @@ cleanup() {
   if [[ "${CRD_CREATED}" == 1 ]]; then
     kubectl delete crd "${CRD_NAME}" --ignore-not-found >/dev/null 2>&1
   fi
+  if [[ "${LOCK_ACQUIRED}" == 1 ]]; then
+    lock_holder="$(kubectl -n "${LOCK_NAMESPACE}" get configmap "${LOCK_NAME}" -o jsonpath='{.data.run-id}' 2>/dev/null || true)"
+    if [[ "${lock_holder}" == "${RUN_ID}" ]]; then
+      kubectl -n "${LOCK_NAMESPACE}" delete configmap "${LOCK_NAME}" --ignore-not-found >/dev/null 2>&1
+    fi
+  fi
   docker image rm --force "${IMAGE}" >/dev/null 2>&1 || true
   rm -rf "${TMP_DIR}"
 }
@@ -48,25 +57,19 @@ if [[ "${context}" != "orbstack" ]]; then
 fi
 kubectl get nodes >/dev/null
 
-if ! kubectl get crd "${CRD_NAME}" >/dev/null 2>&1; then
-  CRD_CREATED=1
+if ! kubectl -n "${LOCK_NAMESPACE}" create configmap "${LOCK_NAME}" --from-literal="run-id=${RUN_ID}" >/dev/null 2>&1; then
+  echo "refusing E2E because another run holds ${LOCK_NAMESPACE}/${LOCK_NAME}; remove a stale lock only after verifying no E2E run is active" >&2
+  exit 2
 fi
-if ! kubectl get clusterrole supek8smcp-tokenreviewer >/dev/null 2>&1; then
-  TOKEN_REVIEWER_CREATED=1
-fi
+LOCK_ACQUIRED=1
 
 if kubectl get crd "${CRD_NAME}" >/dev/null 2>&1; then
-  initial_deletion_timestamp="$(kubectl get crd "${CRD_NAME}" -o jsonpath='{.metadata.deletionTimestamp}' 2>/dev/null || true)"
-  [[ -z "${initial_deletion_timestamp}" ]] || CRD_CREATED=1
-  for _ in $(seq 1 60); do
-    deletion_timestamp="$(kubectl get crd "${CRD_NAME}" -o jsonpath='{.metadata.deletionTimestamp}' 2>/dev/null || true)"
-    [[ -z "${deletion_timestamp}" ]] && break
-    sleep 1
-  done
-  if kubectl get crd "${CRD_NAME}" >/dev/null 2>&1; then
-    deletion_timestamp="$(kubectl get crd "${CRD_NAME}" -o jsonpath='{.metadata.deletionTimestamp}' 2>/dev/null || true)"
-    [[ -z "${deletion_timestamp}" ]] || { echo "CRD ${CRD_NAME} is still terminating" >&2; exit 2; }
-  fi
+  echo "refusing E2E because CRD ${CRD_NAME} already exists; use a disposable OrbStack cluster" >&2
+  exit 2
+fi
+if kubectl get clusterrole supek8smcp-tokenreviewer >/dev/null 2>&1; then
+  echo "refusing E2E because ClusterRole supek8smcp-tokenreviewer already exists; use a disposable OrbStack cluster" >&2
+  exit 2
 fi
 
 echo "building ${IMAGE}"
@@ -74,7 +77,8 @@ CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags "-s -w -X main.version=e2e-
   -o "${TMP_DIR}/supek8smcp" "${ROOT_DIR}/cmd/supek8smcp"
 docker build --quiet -f "${ROOT_DIR}/test/e2e/Dockerfile" -t "${IMAGE}" "${TMP_DIR}" >/dev/null
 
-kubectl apply -f "${ROOT_DIR}/config/crd/bases/mcp.supek8smcp.io_kubernetesmcpservers.yaml" >/dev/null
+kubectl create -f "${ROOT_DIR}/config/crd/bases/mcp.supek8smcp.io_kubernetesmcpservers.yaml" >/dev/null
+CRD_CREATED=1
 kubectl wait --for=condition=Established "crd/${CRD_NAME}" --timeout=60s >/dev/null
 kubectl create namespace "${OPERATOR_NAMESPACE}" >/dev/null
 kubectl create namespace "${E2E_NAMESPACE}" >/dev/null
@@ -96,7 +100,8 @@ sed \
 sed "s|supek8smcp-system|${OPERATOR_NAMESPACE}|g" "${ROOT_DIR}/config/rbac/service_account.yaml" > "${TMP_DIR}/service_account.yaml"
 
 kubectl apply -f "${TMP_DIR}/service_account.yaml" >/dev/null
-kubectl apply -f "${TMP_DIR}/role.yaml" >/dev/null
+kubectl create -f "${TMP_DIR}/role.yaml" >/dev/null
+TOKEN_REVIEWER_CREATED=1
 kubectl apply -f "${TMP_DIR}/role_binding.yaml" >/dev/null
 kubectl apply -f "${TMP_DIR}/manager.yaml" >/dev/null
 kubectl rollout status -n "${OPERATOR_NAMESPACE}" deployment/supek8smcp-controller-manager --timeout=180s >/dev/null

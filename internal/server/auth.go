@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -113,10 +114,10 @@ func (a *Authenticator) Authenticate(ctx context.Context, token string) (*Princi
 	if err != nil {
 		return nil, &authenticationError{reason: "tokenreview_error", cause: err}
 	}
+	if review.Status.Error != "" {
+		return nil, &authenticationError{reason: "tokenreview_error", cause: errors.New(review.Status.Error)}
+	}
 	if !review.Status.Authenticated {
-		if review.Status.Error != "" {
-			return nil, &authenticationError{reason: "invalid_token", cause: errors.New(review.Status.Error)}
-		}
 		return nil, &authenticationError{reason: "invalid_token"}
 	}
 
@@ -153,6 +154,45 @@ func (a *Authenticator) Authenticate(ctx context.Context, token string) (*Princi
 		Discovery:  discoveryClient,
 		Kubernetes: kubeClient,
 	}, nil
+}
+
+func (a *Authenticator) Ready(ctx context.Context) error {
+	token, err := a.serverToken()
+	if err != nil {
+		return fmt.Errorf("load TokenReview readiness credential: %w", err)
+	}
+	review, err := a.reviewer.AuthenticationV1().TokenReviews().Create(ctx, &authenticationv1.TokenReview{
+		Spec: authenticationv1.TokenReviewSpec{Token: token},
+	}, metav1.CreateOptions{})
+	if err != nil {
+		return fmt.Errorf("TokenReview readiness check failed: %w", err)
+	}
+	if review.Status.Error != "" {
+		return fmt.Errorf("TokenReview readiness check failed: %s", review.Status.Error)
+	}
+	if !review.Status.Authenticated {
+		return errors.New("TokenReview readiness credential was not authenticated")
+	}
+	return nil
+}
+
+func (a *Authenticator) serverToken() (string, error) {
+	if a.base == nil {
+		return "", errors.New("server Kubernetes configuration is unavailable")
+	}
+	if a.base.BearerTokenFile != "" {
+		data, err := os.ReadFile(a.base.BearerTokenFile)
+		if err != nil {
+			return "", err
+		}
+		if token := strings.TrimSpace(string(data)); token != "" {
+			return token, nil
+		}
+	}
+	if token := strings.TrimSpace(a.base.BearerToken); token != "" {
+		return token, nil
+	}
+	return "", errors.New("server Kubernetes credential is empty")
 }
 
 func configWithTimeout(base *rest.Config, timeout time.Duration) *rest.Config {

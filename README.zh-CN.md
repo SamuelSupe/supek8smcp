@@ -12,16 +12,16 @@
 [![GHCR](https://img.shields.io/badge/GHCR-container-2496ED?logo=docker&logoColor=white)](https://github.com/samuelsupe/supek8smcp/pkgs/container/supek8smcp)
 [![Go](https://img.shields.io/badge/go-1.25.12-00ADD8?logo=go&logoColor=white)](go.mod)
 
-## v0.3.0 下载
+## v0.4.0 下载
 
-- [Linux x64（amd64）压缩包](https://github.com/SamuelSupe/supek8smcp/releases/download/v0.3.0/supek8smcp_0.3.0_linux_amd64.tar.gz)
-- [Linux ARM64 压缩包](https://github.com/SamuelSupe/supek8smcp/releases/download/v0.3.0/supek8smcp_0.3.0_linux_arm64.tar.gz)
-- [SHA-256 校验和](https://github.com/SamuelSupe/supek8smcp/releases/download/v0.3.0/checksums.txt)
+- [Linux x64（amd64）压缩包](https://github.com/SamuelSupe/supek8smcp/releases/download/v0.4.0/supek8smcp_0.4.0_linux_amd64.tar.gz)
+- [Linux ARM64 压缩包](https://github.com/SamuelSupe/supek8smcp/releases/download/v0.4.0/supek8smcp_0.4.0_linux_arm64.tar.gz)
+- [SHA-256 校验和](https://github.com/SamuelSupe/supek8smcp/releases/download/v0.4.0/checksums.txt)
 
 直接从 GitHub Release 安装或升级 Operator chart：
 
 ```bash
-helm upgrade --install supek8smcp https://github.com/SamuelSupe/supek8smcp/releases/download/v0.3.0/supek8smcp-0.3.0.tgz \
+helm upgrade --install supek8smcp https://github.com/SamuelSupe/supek8smcp/releases/download/v0.4.0/supek8smcp-0.4.0.tgz \
   --namespace supek8smcp-system --create-namespace
 ```
 
@@ -31,7 +31,7 @@ helm upgrade --install supek8smcp https://github.com/SamuelSupe/supek8smcp/relea
 
 - 渐进式 MCP 工具面：先调用 `k8s.help`，再搜索紧凑且不透明的 `cap_` 能力句柄，只检查或读取选中的资源，写入必须经过明确的 plan/commit 边界。
 - 三种模式，以及独立的 scope、policy、超时、字节、列表、并发和按身份限流预算。
-- list/watch 默认使用紧凑摘要，递归剔除 annotations 和 managedFields，并脱敏凭据特征注解；同时提供有界 schema、日志与 exec/attach 输出、结构化错误与安全审计事件、Prometheus 指标和可选告警。
+- list/watch 默认使用紧凑摘要，支持按名称约束和 resourceVersion/bookmark 续传，递归剔除 annotations 和 managedFields，并脱敏凭据特征注解；同时提供有界 schema、日志与 exec/attach 输出、结构化错误与安全审计事件、Prometheus 指标和可选告警。
 - Operator 自管共享 CA 并自动轮换服务端叶子证书，或使用经校验的同命名空间 `kubernetes.io/tls` Secret。
 
 ## 模式对比
@@ -74,7 +74,7 @@ sequenceDiagram
 
 ### 紧凑读取输出
 
-`k8s.read` 的 list 和 watch 默认使用 `outputMode: summary`，get 默认使用 `full`。所有模式都会递归剔除 `metadata.annotations` 和 `metadata.managedFields`；只有显式传入 `omitAnnotations: false` 或 `omitManagedFields: false` 才会保留。即使显式返回 annotations，包含凭据特征的注解 key 或内部赋值仍会脱敏。重复行优先使用 `table`，只有确实需要完整对象时才使用 `full`；也可以通过 `fieldPaths` 从单个对象或每个列表项投影相同的对象相对路径：
+`k8s.read` 的 list 和 watch 默认使用 `outputMode: summary`，get 默认使用 `full`。所有模式都会递归剔除 `metadata.annotations` 和 `metadata.managedFields`；只有显式传入 `omitAnnotations: false` 或 `omitManagedFields: false` 才会保留。即使显式返回 annotations，包含凭据特征的注解 key 或内部赋值仍会脱敏。list/watch 传入 `name` 时，Server 会附加精确的 `metadata.name` field selector，并拒绝冲突的 selector，以保持 `resourceNames` RBAC 语义；watch 返回最新 `resourceVersion`，可携带它续传，并保留有界 bookmark/error 事件诊断。Pod 日志和 Dangerous 远程操作省略 `container` 时会解析默认容器注解（这要求 Pod `get` 权限）；持续日志即使遇到超长单行也不会突破输出字节上限。重复行优先使用 `table`，只有确实需要完整对象时才使用 `full`；也可以通过 `fieldPaths` 从单个对象或每个列表项投影相同的对象相对路径：
 
 ```json
 {
@@ -105,7 +105,7 @@ flowchart LR
 
 ```bash
 make install
-make deploy IMG=ghcr.io/your-org/supek8smcp:0.3.0
+make deploy IMG=ghcr.io/your-org/supek8smcp:0.4.0
 kubectl create namespace supek8smcp-servers
 ```
 
@@ -145,7 +145,7 @@ kubectl -n supek8smcp-servers get svc -l app.kubernetes.io/instance=team-readonl
 构建并发布不可变镜像，然后安装 CRD 和 Operator：
 
 ```bash
-export IMG=registry.example.com/platform/supek8smcp:0.3.0
+export IMG=registry.example.com/platform/supek8smcp:0.4.0
 make docker-build IMG="$IMG"
 docker push "$IMG"
 make install
@@ -167,7 +167,7 @@ make fmt
 make vet
 make test
 make build
-make docker-build IMG=ghcr.io/your-org/supek8smcp:0.3.0
+make docker-build IMG=ghcr.io/your-org/supek8smcp:0.4.0
 ```
 
 API 类型变更时使用 `make manifests`，审查生成的 YAML，不要手工修改。发布镜像应使用不可变 tag 或 digest，并通过仓库的 release 自动化发布。提交改动或报告漏洞前请阅读 [`CHANGELOG.md`](CHANGELOG.md)、[`CONTRIBUTING.md`](CONTRIBUTING.md) 和 [`SECURITY.md`](SECURITY.md)。

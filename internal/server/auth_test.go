@@ -2,9 +2,11 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -14,7 +16,10 @@ import (
 	"time"
 
 	authenticationv1 "k8s.io/api/authentication/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	k8sfake "k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/rest"
+	k8stesting "k8s.io/client-go/testing"
 
 	mcpv1alpha1 "github.com/samuelsupe/supek8smcp/api/v1alpha1"
 	"github.com/samuelsupe/supek8smcp/internal/runtimeconfig"
@@ -81,6 +86,94 @@ func TestPrincipalIdentityKeyIgnoresGroupsExtraAndToken(t *testing.T) {
 	}
 	if base.SubjectKey() == variants[0].SubjectKey() {
 		t.Fatal("SubjectKey() did not change when groups/extra changed")
+	}
+}
+
+func TestAuthenticatorReadinessChecksTokenReviewAccess(t *testing.T) {
+	t.Parallel()
+
+	client := k8sfake.NewSimpleClientset()
+	var reviewedToken string
+	client.PrependReactor("create", "tokenreviews", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		review := action.(k8stesting.CreateAction).GetObject().(*authenticationv1.TokenReview)
+		reviewedToken = review.Spec.Token
+		return true, &authenticationv1.TokenReview{
+			Status: authenticationv1.TokenReviewStatus{Error: "invalid bearer token"},
+		}, nil
+	})
+	authenticator := &Authenticator{base: &rest.Config{BearerToken: "server-token"}, reviewer: client}
+	if err := authenticator.Ready(context.Background()); err == nil {
+		t.Fatal("Ready() succeeded when TokenReview returned status.error")
+	} else if !strings.Contains(err.Error(), "invalid bearer token") {
+		t.Fatalf("Ready() error = %v, want TokenReview status.error to be preserved", err)
+	}
+	if reviewedToken != "server-token" {
+		t.Fatalf("readiness TokenReview token = %q, want server bearer token", reviewedToken)
+	}
+
+	deniedClient := k8sfake.NewSimpleClientset()
+	deniedClient.PrependReactor("create", "tokenreviews", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, errors.New("tokenreviews is forbidden")
+	})
+	if err := (&Authenticator{base: &rest.Config{BearerToken: "server-token"}, reviewer: deniedClient}).Ready(context.Background()); err == nil {
+		t.Fatal("Ready() succeeded when TokenReview access was denied")
+	}
+}
+
+func TestAuthenticatorTokenReviewStatusErrorIsRetryable(t *testing.T) {
+	t.Parallel()
+
+	client := k8sfake.NewSimpleClientset()
+	client.PrependReactor("create", "tokenreviews", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		return true, &authenticationv1.TokenReview{
+			Status: authenticationv1.TokenReviewStatus{Error: "authentication webhook unavailable"},
+		}, nil
+	})
+
+	principal, err := (&Authenticator{reviewer: client}).Authenticate(context.Background(), "caller-token")
+	if principal != nil {
+		t.Fatalf("Authenticate() principal = %#v, want nil on TokenReview status.error", principal)
+	}
+	var authErr *authenticationError
+	if !errors.As(err, &authErr) {
+		t.Fatalf("Authenticate() error = %v, want authenticationError", err)
+	}
+	if authErr.reason != "tokenreview_error" {
+		t.Fatalf("Authenticate() error reason = %q, want tokenreview_error for retryable infrastructure failure", authErr.reason)
+	}
+	if !strings.Contains(err.Error(), "authentication webhook unavailable") {
+		t.Fatalf("Authenticate() error = %v, want TokenReview status.error detail", err)
+	}
+}
+
+func TestAuthenticationMiddlewareMarksTokenReviewStatusErrorRetryable(t *testing.T) {
+	t.Parallel()
+
+	client := k8sfake.NewSimpleClientset()
+	client.PrependReactor("create", "tokenreviews", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		return true, &authenticationv1.TokenReview{
+			Status: authenticationv1.TokenReviewStatus{Error: "authentication webhook unavailable"},
+		}, nil
+	})
+	app := newAuditTestApp(slog.Default())
+	app.authenticator = &Authenticator{reviewer: client}
+	app.semaphore = make(chan struct{}, 1)
+	handler := app.authenticationMiddleware(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Fatal("authentication middleware called downstream handler after TokenReview status.error")
+	}))
+	request := httptest.NewRequest(http.MethodGet, "/mcp", nil)
+	request.Header.Set("Authorization", "Bearer caller-token")
+	writer := httptest.NewRecorder()
+	handler.ServeHTTP(writer, request)
+	if writer.Code != http.StatusServiceUnavailable {
+		t.Fatalf("authentication middleware status = %d, want %d", writer.Code, http.StatusServiceUnavailable)
+	}
+	var payload toolErrorOutput
+	if err := json.Unmarshal(writer.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("authentication middleware response = %q, want structured JSON: %v", writer.Body.String(), err)
+	}
+	if payload.Code != "tokenreview_error" || !payload.Retryable {
+		t.Fatalf("authentication middleware payload = %#v, want tokenreview_error/retryable=true", payload)
 	}
 }
 
