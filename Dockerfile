@@ -1,5 +1,5 @@
 ARG BUILDPLATFORM=linux/amd64
-FROM --platform=${BUILDPLATFORM} golang:1.25.13 AS builder
+FROM --platform=${BUILDPLATFORM} golang:1.27 AS builder
 
 ARG VERSION=0.4.0
 ARG TARGETOS=linux
