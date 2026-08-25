@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -45,6 +46,10 @@ func (a *App) executeRemote(ctx context.Context, request *mcp.CallToolRequest, p
 	result := map[string]any{"stdout": stdout.String(), "stderr": stderr.String(), "truncated": stdout.Truncated() || stderr.Truncated()}
 	if err != nil {
 		result["error"] = err.Error()
+		var exitError interface{ ExitStatus() int }
+		if errors.As(err, &exitError) {
+			result["exitCode"] = exitError.ExitStatus()
+		}
 		return result, fmt.Errorf("remote %s failed: %w", verb, err)
 	}
 	return result, nil
@@ -62,29 +67,26 @@ func (a *App) remoteTimeout(seconds int64) time.Duration {
 	return wanted
 }
 
-func validateContainer(pod *corev1.Pod, requested string) error {
-	if requested == "" {
-		if len(pod.Spec.Containers) == 0 {
-			return policyError("invalid_input", "Pod has no containers")
-		}
-		return nil
-	}
+func resolveContainer(pod *corev1.Pod, requested string) (string, error) {
 	for _, container := range pod.Spec.Containers {
 		if container.Name == requested {
-			return nil
+			return container.Name, nil
 		}
 	}
-	return policyError("invalid_input", fmt.Sprintf("container %q does not exist", requested))
-}
-
-func selectedContainer(pod *corev1.Pod, requested string) string {
 	if requested != "" {
-		return requested
+		return "", policyError("invalid_input", fmt.Sprintf("container %q does not exist", requested))
+	}
+	if name := pod.Annotations["kubectl.kubernetes.io/default-container"]; name != "" {
+		for _, container := range pod.Spec.Containers {
+			if container.Name == name {
+				return name, nil
+			}
+		}
 	}
 	if len(pod.Spec.Containers) > 0 {
-		return pod.Spec.Containers[0].Name
+		return pod.Spec.Containers[0].Name, nil
 	}
-	return ""
+	return "", policyError("invalid_input", "Pod has no containers")
 }
 
 type progressBuffer struct {

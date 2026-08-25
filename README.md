@@ -10,18 +10,18 @@ Turn a namespaced custom resource into a single-replica, HTTPS Streamable HTTP M
 [![CI](https://github.com/samuelsupe/supek8smcp/actions/workflows/ci.yml/badge.svg)](https://github.com/samuelsupe/supek8smcp/actions/workflows/ci.yml)
 [![Release](https://github.com/samuelsupe/supek8smcp/actions/workflows/release.yml/badge.svg)](https://github.com/samuelsupe/supek8smcp/actions/workflows/release.yml)
 [![GHCR](https://img.shields.io/badge/GHCR-container-2496ED?logo=docker&logoColor=white)](https://github.com/samuelsupe/supek8smcp/pkgs/container/supek8smcp)
-[![Go](https://img.shields.io/badge/go-1.25.12-00ADD8?logo=go&logoColor=white)](go.mod)
+[![Go](https://img.shields.io/badge/go-1.25.13-00ADD8?logo=go&logoColor=white)](go.mod)
 
-## v0.3.0 downloads
+## v0.4.0 downloads
 
-- [Linux x64 (amd64) archive](https://github.com/SamuelSupe/supek8smcp/releases/download/v0.3.0/supek8smcp_0.3.0_linux_amd64.tar.gz)
-- [Linux ARM64 archive](https://github.com/SamuelSupe/supek8smcp/releases/download/v0.3.0/supek8smcp_0.3.0_linux_arm64.tar.gz)
-- [SHA-256 checksums](https://github.com/SamuelSupe/supek8smcp/releases/download/v0.3.0/checksums.txt)
+- [Linux x64 (amd64) archive](https://github.com/SamuelSupe/supek8smcp/releases/download/v0.4.0/supek8smcp_0.4.0_linux_amd64.tar.gz)
+- [Linux ARM64 archive](https://github.com/SamuelSupe/supek8smcp/releases/download/v0.4.0/supek8smcp_0.4.0_linux_arm64.tar.gz)
+- [SHA-256 checksums](https://github.com/SamuelSupe/supek8smcp/releases/download/v0.4.0/checksums.txt)
 
 Install or upgrade the Operator chart directly from the GitHub Release:
 
 ```bash
-helm upgrade --install supek8smcp https://github.com/SamuelSupe/supek8smcp/releases/download/v0.3.0/supek8smcp-0.3.0.tgz \
+helm upgrade --install supek8smcp https://github.com/SamuelSupe/supek8smcp/releases/download/v0.4.0/supek8smcp-0.4.0.tgz \
   --namespace supek8smcp-system --create-namespace
 ```
 
@@ -31,7 +31,7 @@ helm upgrade --install supek8smcp https://github.com/SamuelSupe/supek8smcp/relea
 
 - A progressively disclosed MCP surface: start with `k8s.help`, search for a compact opaque `cap_` capability handle, inspect or read only the selected resource, and use the explicit plan/commit boundary for writes.
 - Three modes with conservative defaults and independent scope, policy, timeout, byte, list, concurrency, and per-identity rate budgets.
-- Compact list/watch summaries by default, recursive omission of annotations and managed fields, credential-like annotation redaction, bounded schema/log/exec output, structured errors and audit events, Prometheus metrics, and optional alerts.
+- Compact list/watch summaries by default, name-scoped list/watch selectors, resumable watch resourceVersions and bookmarks, recursive omission of annotations and managed fields, credential-like annotation redaction, bounded schema/log/exec output, structured errors and audit events, Prometheus metrics, and optional alerts.
 - Operator-managed shared CA and automatic serving-leaf rotation, or a validated same-namespace `kubernetes.io/tls` Secret.
 
 ## Modes at a glance
@@ -74,7 +74,7 @@ sequenceDiagram
 
 ### Compact read output
 
-`k8s.read` list and watch actions default to `outputMode: summary`; get defaults to `full`. Every mode recursively omits `metadata.annotations` and `metadata.managedFields` unless `omitAnnotations: false` or `omitManagedFields: false` is explicit. Credential-like annotation keys or embedded assignments remain redacted when annotations are included. Use `table` for the smallest repeated-row representation, `full` only when the whole object is needed, or `fieldPaths` to project the same object-relative paths from one object or every list item:
+`k8s.read` list and watch actions default to `outputMode: summary`; get defaults to `full`. Every mode recursively omits `metadata.annotations` and `metadata.managedFields` unless `omitAnnotations: false` or `omitManagedFields: false` is explicit. Credential-like annotation keys or embedded assignments remain redacted when annotations are included. For list/watch, pass `name` when a Role uses `resourceNames`; the Server adds an exact `metadata.name` selector and rejects a conflicting selector. Pass a returned `resourceVersion` to resume a watch; the result carries the latest resource version and bounded bookmark/error events. Pod logs and Dangerous remote actions resolve the default-container annotation when `container` is omitted (which requires Pod `get` permission), and continuous logs remain bounded even when a line is longer than the output budget. Use `table` for the smallest repeated-row representation, `full` only when the whole object is needed, or `fieldPaths` to project the same object-relative paths from one object or every list item:
 
 ```json
 {
@@ -105,7 +105,7 @@ Create a dedicated endpoint namespace first. Anyone who can create a Pod there m
 
 ```bash
 make install
-make deploy IMG=ghcr.io/your-org/supek8smcp:0.3.0
+make deploy IMG=ghcr.io/your-org/supek8smcp:0.4.0
 kubectl create namespace supek8smcp-servers
 ```
 
@@ -145,7 +145,7 @@ Use `status.endpoint` and the CA from `status.caConfigMapName`; send a short-liv
 Build and publish an immutable image, then install the CRD and Operator:
 
 ```bash
-export IMG=registry.example.com/platform/supek8smcp:0.3.0
+export IMG=registry.example.com/platform/supek8smcp:0.4.0
 make docker-build IMG="$IMG"
 docker push "$IMG"
 make install
@@ -167,7 +167,7 @@ make fmt
 make vet
 make test
 make build
-make docker-build IMG=ghcr.io/your-org/supek8smcp:0.3.0
+make docker-build IMG=ghcr.io/your-org/supek8smcp:0.4.0
 ```
 
 Use `make manifests` when API types change; review generated YAML rather than editing it by hand. Release images should use immutable tags or digests and be published through the repository's release automation. See [`CHANGELOG.md`](CHANGELOG.md), [`CONTRIBUTING.md`](CONTRIBUTING.md), and [`SECURITY.md`](SECURITY.md) before opening a change or reporting a vulnerability.

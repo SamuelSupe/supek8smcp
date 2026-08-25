@@ -2,8 +2,8 @@ apiVersion: v2
 name: supek8smcp
 description: Kubernetes-native MCP server operator with delegated Kubernetes RBAC
 type: application
-version: 0.3.0
-appVersion: "0.3.0"
+version: 0.4.0
+appVersion: "0.4.0"
 home: https://github.com/SamuelSupe/supek8smcp
 icon: https://raw.githubusercontent.com/SamuelSupe/supek8smcp/main/docs/assets/supek8smcp-logo.png
 sources:

@@ -2,6 +2,32 @@
 
 All notable changes to supek8smcp are documented here. This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) conventions. The repository currently records releases from v0.1.0 onward; no earlier version history is implied.
 
+## [0.4.0] - 2026-08-25
+
+### Added
+
+- Added TokenReview-backed Server readiness: `/readyz` validates the Server's own Kubernetes credential and returns a retryable `tokenreview_unavailable` response when TokenReview access or authentication infrastructure is unavailable.
+- `k8s.read` list/watch calls now accept a target `name`; the Server adds an exact `metadata.name` field selector and rejects a conflicting selector. Watches can resume from `resourceVersion`, request Kubernetes bookmarks, and return the latest resource version plus bounded Kubernetes watch error diagnostics.
+- When a Pod container is omitted, logs and Dangerous exec/attach resolve `kubectl.kubernetes.io/default-container` and fall back to the first regular container. Remote execution results retain bounded stdout/stderr and an exit code when the Kubernetes stream reports one.
+
+### Changed
+
+- TokenReview `status.error` is now classified as `tokenreview_error` (retryable infrastructure failure) instead of `invalid_token`, so clients do not treat an authentication backend outage as a bad caller credential.
+- Catalog refreshes are single-flight. A complete stale catalog remains usable when discovery is partial or fails, and previously issued process-local `cap_` handles remain decodable across successful catalog refreshes; a Server restart still invalidates them.
+- Write capability discovery, planning, and commit authorization now require `get` permission on the base resource in addition to the mutating permission, matching the read needed for previews and resource preconditions.
+- Structured tool errors may include bounded, operation-specific `details` while retaining the stable `{code, message, retryable}` envelope.
+
+### Fixed
+
+- Continuous log streaming now bounds an individual overlong line instead of allowing it to bypass the configured output byte budget.
+- Oversized JSON object requests are consistently rejected as structured HTTP `413 request_too_large` responses, and stateless `DELETE /mcp` remains a clean `204 No Content` path.
+
+### Security
+
+- Name-scoped list/watch authorization now binds the Kubernetes request to `metadata.name`, preserving `resourceNames` RBAC semantics instead of allowing a broader list or watch selector.
+- Readiness and delegated authentication preserve TokenReview failure details only as operational diagnostics; audit events continue to exclude caller tokens, capability handles, resource bodies, and commands, while remote output remains bounded by the configured limits.
+- Release and container builds now use Go 1.25.13, fixing the reachable standard-library vulnerabilities GO-2026-6218, GO-2026-6090, GO-2026-6089, GO-2026-5972, and GO-2026-5026 reported against Go 1.25.12.
+
 ## [0.3.0] - 2026-08-03
 
 ### Added
@@ -73,6 +99,7 @@ All notable changes to supek8smcp are documented here. This project follows [Kee
 
 - No OAuth, port-forward, `cp`, proxy, evict, drain, TTY, JSON-RPC batch, multi-cluster routing, or multi-replica Server support.
 
+[0.4.0]: https://github.com/SamuelSupe/supek8smcp/releases/tag/v0.4.0
 [0.3.0]: https://github.com/SamuelSupe/supek8smcp/releases/tag/v0.3.0
 [0.2.0]: https://github.com/SamuelSupe/supek8smcp/releases/tag/v0.2.0
 [0.1.1]: https://github.com/SamuelSupe/supek8smcp/releases/tag/v0.1.1

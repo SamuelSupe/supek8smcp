@@ -16,10 +16,13 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	authorizationv1 "k8s.io/api/authorization/v1"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/watch"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
 	"k8s.io/client-go/kubernetes"
 	k8sfake "k8s.io/client-go/kubernetes/fake"
@@ -164,6 +167,114 @@ func TestPolicyModesScopesAndSafeWriteDefaults(t *testing.T) {
 				t.Fatalf("Check() reason = %q, want %q (error: %v)", got, tt.want, err)
 			}
 		})
+	}
+}
+
+func TestPolicyOperationRequiresBaseResourceGet(t *testing.T) {
+	t.Parallel()
+
+	client := k8sfake.NewSimpleClientset()
+	var reviewedVerbs []string
+	client.PrependReactor("create", "selfsubjectaccessreviews", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		review := action.(k8stesting.CreateAction).GetObject().(*authorizationv1.SelfSubjectAccessReview)
+		reviewedVerbs = append(reviewedVerbs, review.Spec.ResourceAttributes.Verb)
+		return true, &authorizationv1.SelfSubjectAccessReview{
+			Status: authorizationv1.SubjectAccessReviewStatus{Allowed: true},
+		}, nil
+	})
+	cfg := policyTestConfig(mcpv1alpha1.ModeDangerous, mcpv1alpha1.SensitiveReadAllow)
+	cfg.Spec.Policy.Rules = []mcpv1alpha1.CapabilityRule{{
+		APIGroups: []string{""}, Resources: []string{"configmaps"}, Verbs: []string{"patch"},
+	}}
+	action := policyTestAction("", "configmaps", "patch", "patch", true)
+	err := NewPolicy(cfg).CheckAndAuthorizeOperation(
+		context.Background(), &Principal{Kubernetes: client}, action, "workloads", "settings",
+	)
+	if got := policyReason(err); got != "policy_denied" {
+		t.Fatalf("CheckAndAuthorizeOperation() reason = %q, want policy_denied (error: %v)", got, err)
+	}
+	if len(reviewedVerbs) != 0 {
+		t.Fatalf("reviewed verbs = %#v, want policy to reject the missing get prerequisite before RBAC checks", reviewedVerbs)
+	}
+}
+
+func TestExecPreviewResolvesAndStoresDefaultContainer(t *testing.T) {
+	t.Parallel()
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "worker", Namespace: "workloads", UID: "pod-uid", ResourceVersion: "7",
+			Annotations: map[string]string{"kubectl.kubernetes.io/default-container": "sidecar"},
+		},
+		Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main"}, {Name: "sidecar"}}},
+	}
+	operation := Operation{
+		Action: Action{
+			GVR: schema.GroupVersionResource{Version: "v1", Resource: "pods"}, Kind: "Pod",
+			Subresource: "exec", Verb: "create", Action: "exec", Namespaced: true,
+		},
+		Namespace: "workloads", Name: "worker", Command: []string{"true"},
+	}
+	app := &App{config: policyTestConfig(mcpv1alpha1.ModeDangerous, mcpv1alpha1.SensitiveReadAllow)}
+	principal := &Principal{
+		Kubernetes: k8sfake.NewSimpleClientset(pod),
+		Dynamic:    dynamicfake.NewSimpleDynamicClient(runtime.NewScheme()),
+	}
+	preview, _, err := app.previewOperation(context.Background(), principal, &operation)
+	if err != nil {
+		t.Fatalf("previewOperation(exec) error = %v", err)
+	}
+	if operation.Container != "sidecar" {
+		t.Fatalf("planned container = %q, want annotated default sidecar", operation.Container)
+	}
+	if got := preview.(map[string]any)["container"]; got != "sidecar" {
+		t.Fatalf("preview container = %#v, want sidecar", got)
+	}
+}
+
+func TestNamedListReadAddsResourceNameFieldSelector(t *testing.T) {
+	t.Parallel()
+
+	dynamicClient := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(
+		runtime.NewScheme(),
+		map[schema.GroupVersionResource]string{{Version: "v1", Resource: "pods"}: "PodList"},
+	)
+	var capturedSelector string
+	dynamicClient.PrependReactor("list", "pods", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		capturedSelector = action.(k8stesting.ListAction).GetListRestrictions().Fields.String()
+		return true, &unstructured.UnstructuredList{}, nil
+	})
+	kubernetesClient := k8sfake.NewSimpleClientset()
+	kubernetesClient.PrependReactor("create", "selfsubjectaccessreviews", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		return true, &authorizationv1.SelfSubjectAccessReview{
+			Status: authorizationv1.SubjectAccessReviewStatus{Allowed: true},
+		}, nil
+	})
+	codec, err := newCapabilityCodec()
+	if err != nil {
+		t.Fatalf("newCapabilityCodec() error = %v", err)
+	}
+	capability := capabilityFromAction(codec, policyTestAction("", "pods", "list", "list", true), nil)
+	cfg := policyTestConfig(mcpv1alpha1.ModeReadOnly, mcpv1alpha1.SensitiveReadRedact)
+	app := &App{config: cfg, policy: NewPolicy(cfg), capabilities: codec}
+	_, err = app.read(context.Background(), nil, &Principal{Dynamic: dynamicClient, Kubernetes: kubernetesClient}, ReadInput{
+		CapabilityID: capability.ID, Namespace: "workloads", Name: "worker", FieldSelector: "status.phase=Running",
+	})
+	if err != nil {
+		t.Fatalf("read(named list) error = %v", err)
+	}
+	selector, err := fields.ParseSelector(capturedSelector)
+	if err != nil {
+		t.Fatalf("captured field selector %q is invalid: %v", capturedSelector, err)
+	}
+	if name, exact := selector.RequiresExactMatch("metadata.name"); !exact || name != "worker" {
+		t.Fatalf("captured field selector = %q, want exact metadata.name=worker", capturedSelector)
+	}
+	if got, err := namedFieldSelector("", "worker"); err != nil || got != "metadata.name=worker" {
+		t.Fatalf("empty named field selector = %q, %v, want metadata.name=worker", got, err)
+	}
+	if _, err := namedFieldSelector("metadata.name=other", "worker"); policyReason(err) != "invalid_input" {
+		t.Fatalf("conflicting named field selector error = %v, want invalid_input", err)
 	}
 }
 
@@ -1391,6 +1502,90 @@ func TestReadOutputShapesAndMetadataControls(t *testing.T) {
 	}
 }
 
+func TestWatchPassesResourceVersionAndPreservesSummaryDiagnostics(t *testing.T) {
+	t.Parallel()
+
+	codec, err := newCapabilityCodec()
+	if err != nil {
+		t.Fatalf("newCapabilityCodec() error = %v", err)
+	}
+	action := policyTestAction("", "pods", "watch", "watch", true)
+	capabilityID := capabilityFromAction(codec, action, nil).ID
+
+	dynamicClient := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(
+		runtime.NewScheme(),
+		map[schema.GroupVersionResource]string{{Version: "v1", Resource: "pods"}: "PodList"},
+	)
+	watcher := watch.NewRaceFreeFake()
+	var requestedResourceVersion string
+	dynamicClient.PrependWatchReactor("pods", func(action k8stesting.Action) (bool, watch.Interface, error) {
+		requestedResourceVersion = action.(k8stesting.WatchAction).GetWatchRestrictions().ResourceVersion
+		pod := &unstructured.Unstructured{Object: map[string]any{
+			"apiVersion": "v1", "kind": "Pod",
+			"metadata": map[string]any{"name": "worker", "namespace": "workloads", "resourceVersion": "42"},
+			"status":   map[string]any{"phase": "Running"},
+		}}
+		watcher.Add(pod)
+		watcher.Error(&metav1.Status{
+			TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Status"},
+			Status:   metav1.StatusFailure,
+			Reason:   metav1.StatusReasonExpired,
+			Message:  "watch resourceVersion is too old",
+			Code:     410,
+		})
+		watcher.Stop()
+		return true, watcher, nil
+	})
+
+	kubernetesClient := k8sfake.NewSimpleClientset()
+	kubernetesClient.PrependReactor("create", "selfsubjectaccessreviews", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		return true, &authorizationv1.SelfSubjectAccessReview{
+			Status: authorizationv1.SubjectAccessReviewStatus{Allowed: true},
+		}, nil
+	})
+	cfg := policyTestConfig(mcpv1alpha1.ModeReadOnly, mcpv1alpha1.SensitiveReadAllow)
+	cfg.Spec.Limits.MaxListItems = 2
+	cfg.Spec.Limits.MaxOutputBytes = 1 << 20
+	cfg.Spec.Limits.StreamTimeout = metav1.Duration{Duration: time.Second}
+	app := &App{config: cfg, policy: NewPolicy(cfg), capabilities: codec}
+	output, err := app.read(context.Background(), nil, &Principal{Dynamic: dynamicClient, Kubernetes: kubernetesClient}, ReadInput{
+		CapabilityID: capabilityID, Namespace: "workloads", ResourceVersion: "41",
+	})
+	if err != nil {
+		t.Fatalf("read(watch) error = %v", err)
+	}
+	if requestedResourceVersion != "41" {
+		t.Fatalf("watch resourceVersion = %q, want 41", requestedResourceVersion)
+	}
+	if output["resourceVersion"] != "42" {
+		t.Fatalf("watch result resourceVersion = %#v, want last event resourceVersion 42", output["resourceVersion"])
+	}
+	events, ok := output["events"].([]any)
+	if !ok || len(events) != 2 {
+		t.Fatalf("watch events = %#v, want one object event and one ERROR event", output["events"])
+	}
+	objectEvent := events[0].(map[string]any)
+	objectSummary := objectEvent["object"].(map[string]any)
+	if objectEvent["type"] != string(watch.Added) || objectSummary["resourceVersion"] != "42" {
+		t.Fatalf("watch object event = %#v, want ADDED summary with resourceVersion 42", objectEvent)
+	}
+	errorEvent := events[1].(map[string]any)
+	errorSummary := errorEvent["object"].(map[string]any)
+	if errorEvent["type"] != string(watch.Error) {
+		t.Fatalf("watch error event type = %#v, want ERROR", errorEvent["type"])
+	}
+	for key, want := range map[string]any{
+		"status":  metav1.StatusFailure,
+		"reason":  string(metav1.StatusReasonExpired),
+		"message": "watch resourceVersion is too old",
+		"code":    int64(410),
+	} {
+		if got := fmt.Sprint(errorSummary[key]); got != fmt.Sprint(want) {
+			t.Fatalf("watch ERROR summary[%q] = %#v, want %#v; summary=%#v", key, errorSummary[key], want, errorSummary)
+		}
+	}
+}
+
 func TestPolicyErrorsHaveStableReason(t *testing.T) {
 	t.Parallel()
 
@@ -1466,7 +1661,7 @@ func TestDangerousFollowedLogsStopAtMaxListItemsForEmptyLines(t *testing.T) {
 	app := &App{config: cfg, policy: NewPolicy(cfg), capabilities: codec}
 
 	output, err := app.read(context.Background(), nil, &Principal{Kubernetes: kubernetesClient}, ReadInput{
-		CapabilityID: capabilityID, Namespace: "workloads", Name: "pod", Follow: true,
+		CapabilityID: capabilityID, Namespace: "workloads", Name: "pod", Container: "main", Follow: true,
 	})
 	if err != nil {
 		t.Fatalf("read(follow logs) error = %v", err)
@@ -1480,5 +1675,46 @@ func TestDangerousFollowedLogsStopAtMaxListItemsForEmptyLines(t *testing.T) {
 	}
 	if truncated, ok := output["truncated"].(bool); !ok || !truncated {
 		t.Fatalf("read(follow logs) truncated = %#v, want true after item bound", output["truncated"])
+	}
+}
+
+func TestDangerousFollowedLogsTruncateOverlongLine(t *testing.T) {
+	t.Parallel()
+
+	const maxOutputBytes int64 = 1<<20 + 1024
+	logBody := strings.Repeat("x", int(maxOutputBytes+1024)) + "\n"
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if strings.Contains(request.URL.Path, "/pods/pod/log") {
+			writer.Header().Set("Content-Type", "text/plain")
+			_, _ = fmt.Fprint(writer, logBody)
+		} else {
+			http.NotFound(writer, request)
+		}
+	}))
+	defer server.Close()
+
+	kubernetesClient, err := kubernetes.NewForConfig(&rest.Config{Host: server.URL})
+	if err != nil {
+		t.Fatalf("kubernetes.NewForConfig() error = %v", err)
+	}
+	cfg := policyTestConfig(mcpv1alpha1.ModeDangerous, mcpv1alpha1.SensitiveReadAllow)
+	cfg.Spec.Limits.MaxOutputBytes = maxOutputBytes
+	cfg.Spec.Limits.MaxListItems = 2
+	cfg.Spec.Limits.StreamTimeout = metav1.Duration{Duration: time.Second}
+	app := &App{config: cfg}
+
+	output, err := app.logs(context.Background(), nil, &Principal{Kubernetes: kubernetesClient}, "workloads", ReadInput{
+		Namespace: "workloads", Name: "pod", Container: "main", Follow: true,
+	})
+	if err != nil {
+		t.Fatalf("read(follow logs with overlong line) error = %v, want bounded truncated output", err)
+	}
+	if truncated, ok := output["truncated"].(bool); !ok || !truncated {
+		t.Fatalf("read(follow logs with overlong line) truncated = %#v, want true", output["truncated"])
+	}
+	if logs, ok := output["logs"].([]string); !ok {
+		t.Fatalf("read(follow logs with overlong line) logs = %#v, want []string", output["logs"])
+	} else if len(logs) > 1 {
+		t.Fatalf("read(follow logs with overlong line) returned %d log lines, want bounded output", len(logs))
 	}
 }

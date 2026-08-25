@@ -296,7 +296,7 @@ func TestCatalogCacheExpiredSnapshotSurvivesPartialAndFailedDiscovery(t *testing
 	}
 }
 
-func TestCatalogCacheConcurrentColdLoadsDoNotSerializeDiscovery(t *testing.T) {
+func TestCatalogCacheConcurrentColdLoadsShareOneDiscovery(t *testing.T) {
 	codec, err := newCapabilityCodec()
 	if err != nil {
 		t.Fatalf("newCapabilityCodec() error = %v", err)
@@ -357,12 +357,16 @@ func TestCatalogCacheConcurrentColdLoadsDoNotSerializeDiscovery(t *testing.T) {
 		}{items: items, err: err}
 	}()
 	start.Wait()
-	secondEntered := waitForDiscovery()
+	select {
+	case <-discoveryClient.entered:
+		close(release)
+		<-results
+		<-results
+		t.Fatal("second catalog discovery started while the first refresh was blocked")
+	case <-time.After(100 * time.Millisecond):
+	}
 	close(release)
 	first, second := <-results, <-results
-	if !secondEntered {
-		t.Fatalf("second catalog discovery call did not start while first was blocked; first=%#v second=%#v", first, second)
-	}
 	for index, result := range []struct {
 		items []Capability
 		err   error
@@ -373,6 +377,47 @@ func TestCatalogCacheConcurrentColdLoadsDoNotSerializeDiscovery(t *testing.T) {
 		if len(result.items) == 0 {
 			t.Fatalf("catalogCache.list() call %d returned no capabilities", index+1)
 		}
+	}
+	select {
+	case <-discoveryClient.entered:
+		t.Fatal("shared cold load performed a second discovery after the first refresh completed")
+	default:
+	}
+}
+
+func TestCatalogCacheRefreshRetainsPreviousHandles(t *testing.T) {
+	codec, err := newCapabilityCodec()
+	if err != nil {
+		t.Fatalf("newCapabilityCodec() error = %v", err)
+	}
+	discoveryClient := &scriptedCatalogDiscovery{responses: []catalogDiscoveryResponse{
+		{
+			groups: catalogTestGroups("v1"),
+			resources: []*metav1.APIResourceList{catalogTestResources("v1",
+				metav1.APIResource{Name: "pods", Kind: "Pod", Namespaced: true, Verbs: []string{"get"}},
+			)},
+		},
+		{
+			groups: catalogTestGroups("apps/v1"),
+			resources: []*metav1.APIResourceList{catalogTestResources("apps/v1",
+				metav1.APIResource{Name: "deployments", Kind: "Deployment", Namespaced: true, Verbs: []string{"get"}},
+			)},
+		},
+	}}
+	cache := newCatalogCache(codec)
+	cache.cacheTime = 0
+	principal := &Principal{Discovery: discoveryClient}
+
+	first, err := cache.list(context.Background(), principal)
+	if err != nil || len(first) != 1 {
+		t.Fatalf("first catalogCache.list() = %#v, %v, want one capability", first, err)
+	}
+	second, err := cache.list(context.Background(), principal)
+	if err != nil || len(second) != 1 || second[0].Resource != "deployments" {
+		t.Fatalf("second catalogCache.list() = %#v, %v, want deployment capability", second, err)
+	}
+	if _, err := codec.decode(first[0].ID); err != nil {
+		t.Fatalf("previous snapshot capability %q became invalid after refresh: %v", first[0].ID, err)
 	}
 }
 
@@ -413,6 +458,76 @@ func TestSearchCatalogPassesNameToSelfSubjectAccessReview(t *testing.T) {
 	}
 	if len(result) != 1 || result[0].Resource != "pods" || result[0].Action != "get" {
 		t.Fatalf("searchCatalog() result = %#v, want the named get capability", result)
+	}
+}
+
+func TestSearchCatalogOmitsWriteWithoutPolicyGetPermission(t *testing.T) {
+	t.Parallel()
+
+	client := k8sfake.NewSimpleClientset()
+	ssarCount := 0
+	client.PrependReactor("create", "selfsubjectaccessreviews", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		ssarCount++
+		return true, &authorizationv1.SelfSubjectAccessReview{
+			Status: authorizationv1.SubjectAccessReviewStatus{Allowed: true},
+		}, nil
+	})
+	cfg := policyTestConfig(mcpv1alpha1.ModeDangerous, mcpv1alpha1.SensitiveReadAllow)
+	cfg.Spec.Policy.Rules = []mcpv1alpha1.CapabilityRule{{
+		APIGroups: []string{""}, Resources: []string{"configmaps"}, Verbs: []string{"patch"},
+	}}
+	capability := Capability{
+		Version: "v1", Resource: "configmaps", Kind: "ConfigMap",
+		Action: "patch", Verb: "patch", Namespaced: true,
+	}
+	result, _, err := searchCatalog(
+		context.Background(), []Capability{capability}, NewPolicy(cfg), &Principal{Kubernetes: client},
+		catalogSearchFilter{Namespace: "workloads", Name: "settings"}, "", 1,
+	)
+	if err != nil {
+		t.Fatalf("searchCatalog() error = %v", err)
+	}
+	if len(result) != 0 {
+		t.Fatalf("searchCatalog() returned write without policy get permission: %#v", result)
+	}
+	if ssarCount != 0 {
+		t.Fatalf("SelfSubjectAccessReview count = %d, want policy to reject the missing get prerequisite first", ssarCount)
+	}
+}
+
+func TestSearchCatalogOmitsWriteWithoutRBACGetPermission(t *testing.T) {
+	t.Parallel()
+
+	client := k8sfake.NewSimpleClientset()
+	var reviewedVerbs []string
+	client.PrependReactor("create", "selfsubjectaccessreviews", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		review := action.(k8stesting.CreateAction).GetObject().(*authorizationv1.SelfSubjectAccessReview)
+		verb := review.Spec.ResourceAttributes.Verb
+		reviewedVerbs = append(reviewedVerbs, verb)
+		return true, &authorizationv1.SelfSubjectAccessReview{
+			Status: authorizationv1.SubjectAccessReviewStatus{Allowed: verb == "patch"},
+		}, nil
+	})
+	capability := Capability{
+		Version: "v1", Resource: "configmaps", Kind: "ConfigMap",
+		Action: "patch", Verb: "patch", Namespaced: true,
+	}
+	cfg := policyTestConfig(mcpv1alpha1.ModeDangerous, mcpv1alpha1.SensitiveReadAllow)
+	cfg.Spec.Policy.Rules = []mcpv1alpha1.CapabilityRule{{
+		APIGroups: []string{"*"}, Resources: []string{"*"}, Verbs: []string{"*"},
+	}}
+	result, _, err := searchCatalog(
+		context.Background(), []Capability{capability}, NewPolicy(cfg), &Principal{Kubernetes: client},
+		catalogSearchFilter{Namespace: "workloads", Name: "settings"}, "", 1,
+	)
+	if err != nil {
+		t.Fatalf("searchCatalog() error = %v", err)
+	}
+	if len(result) != 0 {
+		t.Fatalf("searchCatalog() returned write without RBAC get permission: %#v", result)
+	}
+	if !reflect.DeepEqual(reviewedVerbs, []string{"patch", "get"}) {
+		t.Fatalf("reviewed verbs = %#v, want patch and prerequisite get", reviewedVerbs)
 	}
 }
 

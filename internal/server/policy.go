@@ -120,6 +120,33 @@ func (p *Policy) CheckAndAuthorize(ctx context.Context, principal *Principal, ac
 	return p.Authorize(ctx, principal, action, namespace, name)
 }
 
+func (p *Policy) CheckAndAuthorizeOperation(ctx context.Context, principal *Principal, action Action, namespace, name string) error {
+	if err := p.CheckTarget(action, namespace, name); err != nil {
+		return err
+	}
+	var prerequisite Action
+	if action.Mutating() {
+		prerequisite = prerequisiteGetAction(action)
+		if err := p.CheckTarget(prerequisite, namespace, name); err != nil {
+			return err
+		}
+	}
+	if err := p.Authorize(ctx, principal, action, namespace, name); err != nil {
+		return err
+	}
+	if action.Mutating() {
+		return p.Authorize(ctx, principal, prerequisite, namespace, name)
+	}
+	return nil
+}
+
+func prerequisiteGetAction(action Action) Action {
+	action.Subresource = ""
+	action.Verb = "get"
+	action.Action = "get"
+	return action
+}
+
 func (p *Policy) CheckTarget(action Action, namespace, name string) error {
 	if err := p.Check(action, namespace); err != nil {
 		return err
