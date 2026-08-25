@@ -10,7 +10,7 @@ Thank you for improving supek8smcp. Contributions should preserve the project's 
 
 ## Development
 
-The repository requires Go 1.25.12 or newer in the 1.25 line so release builds include current standard-library security fixes. Install the usual Go and Kubernetes tooling, then use the Make targets:
+The repository requires Go 1.25.13 or newer in the 1.25 line so release builds include current standard-library security fixes. Install the usual Go and Kubernetes tooling, then use the Make targets:
 
 ```bash
 make fmt

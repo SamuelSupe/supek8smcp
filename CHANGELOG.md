@@ -26,6 +26,7 @@ All notable changes to supek8smcp are documented here. This project follows [Kee
 
 - Name-scoped list/watch authorization now binds the Kubernetes request to `metadata.name`, preserving `resourceNames` RBAC semantics instead of allowing a broader list or watch selector.
 - Readiness and delegated authentication preserve TokenReview failure details only as operational diagnostics; audit events continue to exclude caller tokens, capability handles, resource bodies, and commands, while remote output remains bounded by the configured limits.
+- Release and container builds now use Go 1.25.13, fixing the reachable standard-library vulnerabilities GO-2026-6218, GO-2026-6090, GO-2026-6089, GO-2026-5972, and GO-2026-5026 reported against Go 1.25.12.
 
 ## [0.3.0] - 2026-08-03
 
