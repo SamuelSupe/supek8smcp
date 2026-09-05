@@ -18,7 +18,6 @@ import (
 	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	api "k8s.io/apimachinery/pkg/api/meta"
-	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -392,10 +391,7 @@ func (r *KubernetesMCPServerReconciler) reconcileDeployment(
 							ReadOnlyRootFilesystem:   &trueValue,
 							Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
 						},
-						Resources: corev1.ResourceRequirements{
-							Requests: corev1.ResourceList{corev1.ResourceCPU: resourceMustParse("50m"), corev1.ResourceMemory: resourceMustParse("64Mi")},
-							Limits:   corev1.ResourceList{corev1.ResourceCPU: resourceMustParse("500m"), corev1.ResourceMemory: resourceMustParse("256Mi")},
-						},
+						Resources: server.Spec.ServerResources(),
 						VolumeMounts: []corev1.VolumeMount{
 							{Name: "config", MountPath: "/etc/supek8smcp/config", ReadOnly: true},
 							{Name: "tls", MountPath: "/etc/supek8smcp/tls", ReadOnly: true},
@@ -591,8 +587,4 @@ func serverProbe(path string) *corev1.Probe {
 		SuccessThreshold: 1,
 		FailureThreshold: 3,
 	}
-}
-
-func resourceMustParse(value string) resource.Quantity {
-	return resource.MustParse(value)
 }

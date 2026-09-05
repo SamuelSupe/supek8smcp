@@ -88,3 +88,69 @@ func TestIdentityRateLimiterRetryAfterSeconds(t *testing.T) {
 		})
 	}
 }
+
+func TestRequestAdmissionIdentityLimitRecoversAfterRelease(t *testing.T) {
+	for _, tt := range []struct {
+		concurrent int
+		attempts   int
+	}{
+		{concurrent: 4, attempts: 2},
+		{concurrent: 5, attempts: 3},
+	} {
+		t.Run(fmt.Sprintf("concurrent-%d", tt.concurrent), func(t *testing.T) {
+			admission := newRequestAdmission(tt.concurrent)
+			for attempt := 0; attempt < tt.attempts; attempt++ {
+				if !admission.acquireIdentity("alice") {
+					t.Fatalf("acquireIdentity(alice) attempt %d failed before the limit", attempt+1)
+				}
+			}
+			if admission.acquireIdentity("alice") {
+				t.Fatal("acquireIdentity(alice) exceeded the per-identity limit")
+			}
+			admission.releaseIdentity("alice")
+			if !admission.acquireIdentity("alice") {
+				t.Fatal("acquireIdentity(alice) did not recover after release")
+			}
+			for attempt := 0; attempt < tt.attempts; attempt++ {
+				admission.releaseIdentity("alice")
+			}
+		})
+	}
+}
+
+func TestRequestAdmissionStreamCapacityReservesShortRequestSlot(t *testing.T) {
+	t.Parallel()
+
+	admission := newRequestAdmission(4)
+	app := &App{admission: admission}
+	const streamCapacity = 3
+	releases := make([]func(), 0, streamCapacity)
+	for attempt := 0; attempt < streamCapacity; attempt++ {
+		release, err := app.acquireStream()
+		if err != nil {
+			t.Fatalf("acquireStream() attempt %d error = %v", attempt+1, err)
+		}
+		releases = append(releases, release)
+	}
+	if release, err := app.acquireStream(); err == nil || policyReason(err) != "stream_capacity" || release != nil {
+		t.Fatalf("acquireStream() at reserved short-request slot = releasePresent=%t error=%v, want stream_capacity", release != nil, err)
+	}
+	releases[0]()
+	if release, err := app.acquireStream(); err != nil || release == nil {
+		t.Fatalf("acquireStream() after stream release = releasePresent=%t error=%v, want recovery", release != nil, err)
+	} else {
+		releases = append(releases, release)
+	}
+	for _, release := range releases[1:] {
+		release()
+	}
+}
+
+func TestRequestAdmissionDisablesStreamsWhenOnlyOneRequestIsAllowed(t *testing.T) {
+	t.Parallel()
+
+	app := &App{admission: newRequestAdmission(1)}
+	if release, err := app.acquireStream(); err == nil || policyReason(err) != "stream_disabled" || release != nil {
+		t.Fatalf("acquireStream() with one request slot = releasePresent=%t error=%v, want stream_disabled", release != nil, err)
+	}
+}

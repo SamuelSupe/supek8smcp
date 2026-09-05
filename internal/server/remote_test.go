@@ -17,6 +17,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/httpstream"
 	"k8s.io/apimachinery/pkg/util/httpstream/spdy"
 	remotecommandconsts "k8s.io/apimachinery/pkg/util/remotecommand"
@@ -26,6 +27,43 @@ import (
 
 	mcpv1alpha1 "github.com/samuelsupe/supek8smcp/api/v1alpha1"
 )
+
+func TestRemoteCommitStreamCapacityPreservesPlan(t *testing.T) {
+	app := &App{plans: NewPlanStore(4), admission: newRequestAdmission(2)}
+	principal := &Principal{Username: "alice", UID: "uid-a"}
+	operation := Operation{
+		Action: Action{
+			GVR:         schema.GroupVersionResource{Version: "v1", Resource: "pods"},
+			Kind:        "Pod",
+			Subresource: "exec",
+			Verb:        "create",
+			Action:      "exec",
+			Namespaced:  true,
+		},
+		Namespace: "workloads", Name: "worker", Command: []string{"true"},
+	}
+	planID, confirmationCode, _, err := app.plans.Create(principal.SubjectKey(), operation)
+	if err != nil {
+		t.Fatalf("plans.Create() error = %v", err)
+	}
+	occupiedRelease, err := app.acquireStream()
+	if err != nil {
+		t.Fatalf("acquireStream() error = %v", err)
+	}
+
+	if _, err := app.commit(context.Background(), nil, principal, CommitInput{PlanID: planID, ConfirmationCode: confirmationCode}); policyReason(err) != "stream_capacity" {
+		t.Fatalf("commit() error = %v, want stream_capacity while stream capacity is full", err)
+	}
+	occupiedRelease()
+
+	got, err := app.plans.Consume(planID, principal.SubjectKey(), confirmationCode)
+	if err != nil {
+		t.Fatalf("Consume() after releasing stream capacity error = %v, want original plan to remain", err)
+	}
+	if got.Action.Action != operation.Action.Action || got.Namespace != operation.Namespace || got.Name != operation.Name {
+		t.Fatalf("Consume() operation = %#v, want preserved operation %#v", got, operation)
+	}
+}
 
 func TestRemoteCommitErrorPreservesPartialStreamsForExecAndAttach(t *testing.T) {
 	for _, actionName := range []string{"exec", "attach"} {

@@ -90,7 +90,7 @@ func (a *App) describe(ctx context.Context, principal *Principal, input Describe
 	if depth > 6 {
 		depth = 6
 	}
-	resourceSchema, err := schemaForCapability(principal, capability, input.FieldPath, depth)
+	resourceSchema, err := a.schemaForCapability(ctx, principal, capability, input.FieldPath, depth)
 	if err != nil {
 		return DescribeOutput{}, err
 	}
@@ -131,6 +131,16 @@ func (a *App) read(ctx context.Context, request *mcp.CallToolRequest, principal 
 	}
 	if action.Action == "logs" && input.Follow && a.config.Spec.Mode != mcpv1alpha1.ModeDangerous {
 		return nil, policyError("mode_denied", "followed log streams require Dangerous mode")
+	}
+	if action.Action == "watch" || (action.Action == "logs" && input.Follow) {
+		release, err := a.acquireStream()
+		if err != nil {
+			return nil, err
+		}
+		defer release()
+		var cancel context.CancelFunc
+		ctx, cancel = timeoutContext(ctx, a.config.Spec.Limits.StreamTimeout.Duration)
+		defer cancel()
 	}
 	if action.Action != "watch" && !(action.Action == "logs" && input.Follow) {
 		var cancel context.CancelFunc

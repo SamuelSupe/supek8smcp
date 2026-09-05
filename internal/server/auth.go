@@ -27,15 +27,16 @@ const maxDelegatedResourceResponseBytes int64 = 8 << 20
 var errDelegatedResourceResponseTooLarge = errors.New("delegated Kubernetes API response exceeds the configured limit")
 
 type Principal struct {
-	Username   string
-	UID        string
-	Groups     []string
-	Extra      map[string]authenticationv1.ExtraValue
-	Token      string
-	Config     *rest.Config
-	Dynamic    dynamic.Interface
-	Discovery  discovery.DiscoveryInterface
-	Kubernetes kubernetes.Interface
+	Username        string
+	UID             string
+	Groups          []string
+	Extra           map[string]authenticationv1.ExtraValue
+	Token           string
+	Config          *rest.Config
+	Dynamic         dynamic.Interface
+	Discovery       discovery.DiscoveryInterface
+	discoveryConfig *rest.Config
+	Kubernetes      kubernetes.Interface
 }
 
 func (p *Principal) IdentityKey() string {
@@ -144,15 +145,16 @@ func (a *Authenticator) Authenticate(ctx context.Context, token string) (*Princi
 		return nil, &authenticationError{reason: "delegated_client_error", cause: err}
 	}
 	return &Principal{
-		Username:   review.Status.User.Username,
-		UID:        review.Status.User.UID,
-		Groups:     append([]string(nil), review.Status.User.Groups...),
-		Extra:      review.Status.User.Extra,
-		Token:      token,
-		Config:     config,
-		Dynamic:    dynamicClient,
-		Discovery:  discoveryClient,
-		Kubernetes: kubeClient,
+		Username:        review.Status.User.Username,
+		UID:             review.Status.User.UID,
+		Groups:          append([]string(nil), review.Status.User.Groups...),
+		Extra:           review.Status.User.Extra,
+		Token:           token,
+		Config:          config,
+		Dynamic:         dynamicClient,
+		Discovery:       discoveryClient,
+		discoveryConfig: discoveryConfig,
+		Kubernetes:      kubeClient,
 	}, nil
 }
 
@@ -299,12 +301,21 @@ func (a *App) authenticationMiddleware(next http.Handler) http.Handler {
 			writeStructuredHTTPError(writer, http.StatusUnauthorized, "missing_bearer", "Kubernetes bearer token required", false)
 			return
 		}
+		if a.globalLimiter != nil && !a.globalLimiter.Allow() {
+			a.recordRateLimit(nil, "global_rate", started)
+			writer.Header().Set("Retry-After", "1")
+			writeStructuredHTTPError(writer, http.StatusTooManyRequests, "global_rate", "server authentication request budget exceeded", true)
+			return
+		}
+		queued := time.Now()
 		queueCtx, queueCancel := a.requestContext(request.Context())
 		select {
 		case a.semaphore <- struct{}{}:
+			a.metrics.observe("queue", queued)
 			queueCancel()
 			defer func() { <-a.semaphore }()
 		case <-queueCtx.Done():
+			a.metrics.observe("queue", queued)
 			queueCancel()
 			a.recordAuthentication(nil, "error", "concurrency_timeout", started)
 			writer.Header().Set("Retry-After", "1")
@@ -335,6 +346,16 @@ func (a *App) authenticationMiddleware(next http.Handler) http.Handler {
 			writer.Header().Set("Retry-After", strconv.Itoa(a.rateLimiter.RetryAfterSeconds()))
 			writeStructuredHTTPError(writer, http.StatusTooManyRequests, reason, "authenticated identity rate limit exceeded", true)
 			return
+		}
+		if a.admission != nil {
+			identity := principal.IdentityKey()
+			if !a.admission.acquireIdentity(identity) {
+				a.recordRateLimit(principal, "identity_concurrency", started)
+				writer.Header().Set("Retry-After", "1")
+				writeStructuredHTTPError(writer, http.StatusTooManyRequests, "identity_concurrency", "identity concurrency limit reached", true)
+				return
+			}
+			defer a.admission.releaseIdentity(identity)
 		}
 		ctx := context.WithValue(request.Context(), principalContextKey{}, principal)
 		next.ServeHTTP(writer, request.WithContext(ctx))

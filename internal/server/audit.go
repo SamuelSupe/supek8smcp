@@ -113,7 +113,7 @@ func auditOutcome(err error) (string, string) {
 	}
 	var toolErr *toolError
 	if errors.As(err, &toolErr) {
-		if toolErr.Reason == "plan_capacity" || toolErr.Reason == "unsupported_operation" {
+		if toolErr.Reason == "stream_capacity" || toolErr.Reason == "plan_capacity" || toolErr.Reason == "unsupported_operation" {
 			return "error", toolErr.Reason
 		}
 		return "deny", toolErr.Reason

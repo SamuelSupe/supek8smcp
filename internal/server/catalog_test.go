@@ -13,6 +13,7 @@ import (
 	"time"
 
 	authorizationv1 "k8s.io/api/authorization/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -234,6 +235,13 @@ func TestCatalogCachePartialDiscoveryDoesNotPopulateCache(t *testing.T) {
 	if len(cache.items) != 0 || !cache.loadedAt.IsZero() {
 		t.Fatalf("partial discovery populated cache: items=%#v loadedAt=%v", cache.items, cache.loadedAt)
 	}
+	if !reflect.DeepEqual(cache.lastPartial, partial) {
+		t.Fatalf("partial discovery lastPartial = %#v, want %#v", cache.lastPartial, partial)
+	}
+	if !cache.retryAt.After(time.Now()) {
+		t.Fatalf("partial discovery retryAt = %v, want a future retry time", cache.retryAt)
+	}
+	cache.retryAt = time.Time{}
 
 	complete, err := cache.list(context.Background(), principal)
 	if err != nil {
@@ -247,6 +255,53 @@ func TestCatalogCachePartialDiscoveryDoesNotPopulateCache(t *testing.T) {
 	}
 	if !reflect.DeepEqual(cache.items, complete) || cache.loadedAt.IsZero() {
 		t.Fatalf("complete discovery did not populate cache: items=%#v loadedAt=%v", cache.items, cache.loadedAt)
+	}
+	if !cache.retryAt.IsZero() || cache.lastPartial != nil {
+		t.Fatalf("successful discovery retained failure state: retryAt=%v lastPartial=%#v", cache.retryAt, cache.lastPartial)
+	}
+}
+
+func TestCatalogCacheFailureBackoffAvoidsImmediateRefresh(t *testing.T) {
+	codec, err := newCapabilityCodec()
+	if err != nil {
+		t.Fatalf("newCapabilityCodec() error = %v", err)
+	}
+	partialResources := []*metav1.APIResourceList{
+		catalogTestResources("v1", metav1.APIResource{Name: "pods", Kind: "Pod", Namespaced: true, Verbs: []string{"get"}}),
+	}
+	fullResources := []*metav1.APIResourceList{
+		catalogTestResources("v1", metav1.APIResource{Name: "pods", Kind: "Pod", Namespaced: true, Verbs: []string{"get"}}),
+		catalogTestResources("apps/v1", metav1.APIResource{Name: "deployments", Kind: "Deployment", Namespaced: true, Verbs: []string{"get"}}),
+	}
+	discoveryClient := &scriptedCatalogDiscovery{responses: []catalogDiscoveryResponse{
+		{groups: catalogTestGroups("v1", "apps/v1"), resources: partialResources, err: errors.New("temporary discovery outage")},
+		{groups: catalogTestGroups("v1", "apps/v1"), resources: fullResources},
+	}}
+	cache := newCatalogCache(codec)
+	principal := &Principal{Discovery: discoveryClient}
+
+	first, err := cache.list(context.Background(), principal)
+	if err != nil || len(first) != 1 || first[0].Resource != "pods" {
+		t.Fatalf("partial catalogCache.list() = %#v, %v, want the partial pods snapshot", first, err)
+	}
+	second, err := cache.list(context.Background(), principal)
+	if err != nil {
+		t.Fatalf("backoff catalogCache.list() error = %v, want the saved partial snapshot", err)
+	}
+	if !reflect.DeepEqual(second, first) {
+		t.Fatalf("backoff catalogCache.list() = %#v, want saved partial %#v", second, first)
+	}
+	if discoveryClient.callCount() != 1 {
+		t.Fatalf("backoff discovery call count = %d, want no immediate retry", discoveryClient.callCount())
+	}
+
+	cache.retryAt = time.Time{}
+	complete, err := cache.list(context.Background(), principal)
+	if err != nil || len(complete) != 2 || !catalogHasResource(complete, "deployments") {
+		t.Fatalf("post-backoff catalogCache.list() = %#v, %v, want complete catalog", complete, err)
+	}
+	if discoveryClient.callCount() != 2 {
+		t.Fatalf("post-backoff discovery call count = %d, want second refresh", discoveryClient.callCount())
 	}
 }
 
@@ -280,6 +335,7 @@ func TestCatalogCacheExpiredSnapshotSurvivesPartialAndFailedDiscovery(t *testing
 	principal := &Principal{Discovery: discoveryClient}
 
 	for attempt, wantReason := range []string{"partial", "failed"} {
+		cache.retryAt = time.Time{}
 		got, err := cache.list(context.Background(), principal)
 		if err != nil {
 			t.Fatalf("%s discovery catalogCache.list() error = %v, want stale snapshot", wantReason, err)
@@ -385,6 +441,77 @@ func TestCatalogCacheConcurrentColdLoadsShareOneDiscovery(t *testing.T) {
 	}
 }
 
+func TestCatalogCacheRefreshWaitHonorsContextCancellation(t *testing.T) {
+	codec, err := newCapabilityCodec()
+	if err != nil {
+		t.Fatalf("newCapabilityCodec() error = %v", err)
+	}
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseDiscovery := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(releaseDiscovery)
+	discoveryClient := &blockingCatalogDiscovery{
+		entered: make(chan struct{}, 2), release: release,
+		groups: []*metav1.APIGroup{{
+			Name:             "",
+			PreferredVersion: metav1.GroupVersionForDiscovery{GroupVersion: "v1", Version: "v1"},
+		}},
+		resources: []*metav1.APIResourceList{{
+			GroupVersion: "v1",
+			APIResources: []metav1.APIResource{{Name: "pods", Kind: "Pod", Namespaced: true, Verbs: []string{"get"}}},
+		}},
+	}
+	cache := newCatalogCache(codec)
+	principal := &Principal{Discovery: discoveryClient}
+	firstResult := make(chan error, 1)
+	go func() {
+		_, err := cache.list(context.Background(), principal)
+		firstResult <- err
+	}()
+	select {
+	case <-discoveryClient.entered:
+	case <-time.After(time.Second):
+		releaseDiscovery()
+		t.Fatal("first catalog discovery call did not start")
+	}
+
+	waitCtx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	secondStarted := make(chan struct{})
+	secondResult := make(chan error, 1)
+	go func() {
+		close(secondStarted)
+		_, err := cache.list(waitCtx, principal)
+		secondResult <- err
+	}()
+	<-secondStarted
+	select {
+	case err := <-secondResult:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			releaseDiscovery()
+			t.Fatalf("waiting catalogCache.list() error = %v, want context deadline", err)
+		}
+	case <-time.After(time.Second):
+		releaseDiscovery()
+		t.Fatal("waiting catalogCache.list() did not honor context cancellation")
+	}
+
+	releaseDiscovery()
+	select {
+	case err := <-firstResult:
+		if err != nil {
+			t.Fatalf("first catalogCache.list() error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("first catalogCache.list() did not finish after discovery release")
+	}
+	select {
+	case <-discoveryClient.entered:
+		t.Fatal("waiting catalogCache.list() started a second discovery refresh")
+	default:
+	}
+}
+
 func TestCatalogCacheRefreshRetainsPreviousHandles(t *testing.T) {
 	codec, err := newCapabilityCodec()
 	if err != nil {
@@ -458,6 +585,123 @@ func TestSearchCatalogPassesNameToSelfSubjectAccessReview(t *testing.T) {
 	}
 	if len(result) != 1 || result[0].Resource != "pods" || result[0].Action != "get" {
 		t.Fatalf("searchCatalog() result = %#v, want the named get capability", result)
+	}
+}
+
+func TestSearchCatalogPropagatesAuthorizationServiceError(t *testing.T) {
+	t.Parallel()
+
+	upstreamErr := errors.New("authorization API returned HTTP 503")
+	client := k8sfake.NewSimpleClientset()
+	client.PrependReactor("create", "selfsubjectaccessreviews", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, upstreamErr
+	})
+	capability := Capability{
+		Version: "v1", Resource: "pods", Kind: "Pod",
+		Action: "get", Verb: "get", Namespaced: true,
+	}
+	policy := NewPolicy(policyTestConfig(mcpv1alpha1.ModeReadOnly, mcpv1alpha1.SensitiveReadRedact))
+	_, _, err := searchCatalog(
+		context.Background(), []Capability{capability}, policy, &Principal{Kubernetes: client},
+		catalogSearchFilter{Namespace: "workloads"}, "", 1,
+	)
+	if err == nil || !errors.Is(err, upstreamErr) {
+		t.Fatalf("searchCatalog() error = %v, want the authorization service error", err)
+	}
+}
+
+func TestSearchCatalogPropagatesAuthorizationEvaluationError(t *testing.T) {
+	t.Parallel()
+
+	client := k8sfake.NewSimpleClientset()
+	client.PrependReactor("create", "selfsubjectaccessreviews", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, &authorizationv1.SelfSubjectAccessReview{
+			Status: authorizationv1.SubjectAccessReviewStatus{
+				EvaluationError: "authorization webhook failed",
+			},
+		}, nil
+	})
+	capability := Capability{
+		Version: "v1", Resource: "pods", Kind: "Pod",
+		Action: "get", Verb: "get", Namespaced: true,
+	}
+	policy := NewPolicy(policyTestConfig(mcpv1alpha1.ModeReadOnly, mcpv1alpha1.SensitiveReadRedact))
+	_, _, err := searchCatalog(
+		context.Background(), []Capability{capability}, policy, &Principal{Kubernetes: client},
+		catalogSearchFilter{Namespace: "workloads"}, "", 1,
+	)
+	if err == nil || !apierrors.IsServiceUnavailable(err) {
+		t.Fatalf("searchCatalog() error = %v, want service-unavailable authorization evaluation error", err)
+	}
+}
+
+func TestSearchCatalogPropagatesContextCancellation(t *testing.T) {
+	t.Parallel()
+
+	client := k8sfake.NewSimpleClientset()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	client.PrependReactor("create", "selfsubjectaccessreviews", func(k8stesting.Action) (bool, runtime.Object, error) {
+		cancel()
+		return true, &authorizationv1.SelfSubjectAccessReview{
+			Status: authorizationv1.SubjectAccessReviewStatus{Allowed: true},
+		}, nil
+	})
+	items := []Capability{
+		{Version: "v1", Resource: "pods", Kind: "Pod", Action: "get", Verb: "get", Namespaced: true},
+		{Version: "v1", Resource: "services", Kind: "Service", Action: "get", Verb: "get", Namespaced: true},
+	}
+	policy := NewPolicy(policyTestConfig(mcpv1alpha1.ModeReadOnly, mcpv1alpha1.SensitiveReadRedact))
+	_, _, err := searchCatalog(ctx, items, policy, &Principal{Kubernetes: client}, catalogSearchFilter{Namespace: "workloads"}, "", 2)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("searchCatalog() error = %v, want context cancellation", err)
+	}
+}
+
+func TestSearchCatalogDeduplicatesAuthorizationReviewsWithinRequest(t *testing.T) {
+	t.Parallel()
+
+	client := k8sfake.NewSimpleClientset()
+	reviewed := make(map[string]int)
+	client.PrependReactor("create", "selfsubjectaccessreviews", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		review := action.(k8stesting.CreateAction).GetObject().(*authorizationv1.SelfSubjectAccessReview)
+		attrs := review.Spec.ResourceAttributes
+		key := strings.Join([]string{attrs.Group, attrs.Version, attrs.Resource, attrs.Subresource, attrs.Verb, attrs.Namespace, attrs.Name}, "\x00")
+		reviewed[key]++
+		return true, &authorizationv1.SelfSubjectAccessReview{
+			Status: authorizationv1.SubjectAccessReviewStatus{Allowed: true},
+		}, nil
+	})
+	cfg := policyTestConfig(mcpv1alpha1.ModeDangerous, mcpv1alpha1.SensitiveReadAllow)
+	cfg.Spec.Policy.Rules = []mcpv1alpha1.CapabilityRule{{
+		APIGroups: []string{"*"}, Resources: []string{"*"}, Verbs: []string{"*"},
+	}}
+	policy := NewPolicy(cfg)
+	principal := &Principal{Kubernetes: client}
+	items := []Capability{
+		{Group: "apps", Version: "v1", Resource: "deployments", Kind: "Deployment", Action: "patch", Verb: "patch", Namespaced: true},
+		{Group: "apps", Version: "v1", Resource: "deployments", Kind: "Deployment", Action: "apply", Verb: "patch", Namespaced: true},
+		{Group: "apps", Version: "v1", Resource: "deployments", Kind: "Deployment", Action: "restart", Verb: "patch", Namespaced: true},
+		{Group: "apps", Version: "v1", Resource: "deployments", Kind: "Deployment", Action: "get", Verb: "get", Namespaced: true},
+	}
+	result, next, err := searchCatalog(context.Background(), items, policy, principal, catalogSearchFilter{Namespace: "workloads", Name: "web"}, "", 10)
+	if err != nil {
+		t.Fatalf("searchCatalog() error = %v", err)
+	}
+	if next != "" || len(result) != len(items) {
+		t.Fatalf("searchCatalog() = %#v, next=%q; want all four equivalent capabilities", result, next)
+	}
+	patchKey := strings.Join([]string{"apps", "v1", "deployments", "", "patch", "workloads", "web"}, "\x00")
+	getKey := strings.Join([]string{"apps", "v1", "deployments", "", "get", "workloads", "web"}, "\x00")
+	if reviewed[patchKey] != 1 || reviewed[getKey] != 1 || len(reviewed) != 2 {
+		t.Fatalf("SSAR reviews = %#v, want one patch and one get prerequisite review", reviewed)
+	}
+
+	if err := policy.CheckAndAuthorizeOperation(context.Background(), principal, items[0].AsAction(), "workloads", "web"); err != nil {
+		t.Fatalf("fresh operation authorization error = %v", err)
+	}
+	if reviewed[patchKey] != 2 || reviewed[getKey] != 2 {
+		t.Fatalf("post-search SSAR reviews = %#v, want commit-style fresh patch/get reviews", reviewed)
 	}
 }
 

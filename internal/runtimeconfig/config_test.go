@@ -7,6 +7,9 @@ import (
 	"testing"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
+
 	mcpv1alpha1 "github.com/samuelsupe/supek8smcp/api/v1alpha1"
 )
 
@@ -116,5 +119,30 @@ func TestLoadRejectsInvalidModeAndLimits(t *testing.T) {
 				t.Fatalf("Load() error = %v, want substring %q", err, tt.wantErr)
 			}
 		})
+	}
+}
+
+func TestValidateResourceBudgetFollowsDefaultsAndConfiguredMemory(t *testing.T) {
+	t.Parallel()
+
+	server := &mcpv1alpha1.KubernetesMCPServer{}
+	server.Name = "demo"
+	server.Namespace = "mcp-system"
+	cfg := FromResource(server)
+	if err := Validate(cfg); err != nil {
+		t.Fatalf("Validate() default config error = %v, want default budget to fit default memory", err)
+	}
+
+	cfg.Spec.Limits.MaxConcurrent = 32
+	cfg.Spec.Limits.MaxOutputBytes = 50 << 20
+	if err := Validate(cfg); err == nil || !strings.Contains(err.Error(), "server memory limit must be at least") {
+		t.Fatalf("Validate() high concurrency/output error = %v, want memory budget rejection", err)
+	}
+
+	cfg.Spec.Resources = corev1.ResourceRequirements{
+		Limits: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("8Gi")},
+	}
+	if err := Validate(cfg); err != nil {
+		t.Fatalf("Validate() after increasing memory = %v, want configured budget to be accepted", err)
 	}
 }

@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"golang.org/x/time/rate"
 	authenticationv1 "k8s.io/api/authentication/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	k8sfake "k8s.io/client-go/kubernetes/fake"
@@ -177,6 +178,42 @@ func TestAuthenticationMiddlewareMarksTokenReviewStatusErrorRetryable(t *testing
 	}
 }
 
+func TestAuthenticationMiddlewareGlobalRateLimitRejectsBeforeTokenReview(t *testing.T) {
+	t.Parallel()
+
+	client := k8sfake.NewSimpleClientset()
+	tokenReviews := 0
+	client.PrependReactor("create", "tokenreviews", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		tokenReviews++
+		return true, &authenticationv1.TokenReview{
+			Status: authenticationv1.TokenReviewStatus{Authenticated: true},
+		}, nil
+	})
+	app := newAuditTestApp(slog.Default())
+	app.authenticator = &Authenticator{reviewer: client}
+	app.globalLimiter = rate.NewLimiter(0, 0)
+	handler := app.authenticationMiddleware(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Fatal("authentication middleware called downstream handler after global rate rejection")
+	}))
+	request := httptest.NewRequest(http.MethodGet, "/mcp", nil)
+	request.Header.Set("Authorization", "Bearer caller-token")
+	writer := httptest.NewRecorder()
+	handler.ServeHTTP(writer, request)
+	if writer.Code != http.StatusTooManyRequests {
+		t.Fatalf("authentication middleware status = %d, want %d", writer.Code, http.StatusTooManyRequests)
+	}
+	var payload toolErrorOutput
+	if err := json.Unmarshal(writer.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("authentication middleware response = %q, want structured JSON: %v", writer.Body.String(), err)
+	}
+	if payload.Code != "global_rate" || !payload.Retryable {
+		t.Fatalf("authentication middleware payload = %#v, want global_rate/retryable=true", payload)
+	}
+	if tokenReviews != 0 {
+		t.Fatalf("TokenReview calls = %d, want zero when global rate limit is exhausted", tokenReviews)
+	}
+}
+
 func TestAuthenticatorTokenReviewUsesConfiguredTimeoutWithoutCallerDeadline(t *testing.T) {
 	const requestTimeout = 100 * time.Millisecond
 	started := make(chan struct{})
@@ -276,6 +313,60 @@ func TestAuthenticatorDiscoveryUsesRequestTimeoutAfterTokenReview(t *testing.T) 
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("ServerGroupsAndResources() did not honor the configured request timeout")
+	}
+}
+
+func TestPrincipalDiscoveryForContextPropagatesCancellation(t *testing.T) {
+	startedDiscovery := make(chan struct{})
+	var discoveryStarted sync.Once
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if strings.HasSuffix(request.URL.Path, "/tokenreviews") {
+			writer.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprint(writer, `{"apiVersion":"authentication.k8s.io/v1","kind":"TokenReview","status":{"authenticated":true,"user":{"username":"alice","uid":"uid-1"}}}`)
+			return
+		}
+		discoveryStarted.Do(func() { close(startedDiscovery) })
+		<-request.Context().Done()
+	}))
+	defer server.Close()
+
+	authenticator, err := NewAuthenticator(&rest.Config{Host: server.URL}, time.Second, time.Second)
+	if err != nil {
+		t.Fatalf("NewAuthenticator() error = %v", err)
+	}
+	principal, err := authenticator.Authenticate(context.Background(), "caller-token")
+	if err != nil {
+		t.Fatalf("Authenticate() error = %v", err)
+	}
+	if principal.discoveryConfig == nil {
+		t.Fatal("Authenticate() did not retain a discovery config for request-scoped clients")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	discoveryClient, err := principal.discoveryForContext(ctx)
+	if err != nil {
+		cancel()
+		t.Fatalf("discoveryForContext() error = %v", err)
+	}
+	result := make(chan error, 1)
+	go func() {
+		_, _, err := discoveryClient.ServerGroupsAndResources()
+		result <- err
+	}()
+	select {
+	case <-startedDiscovery:
+	case <-time.After(time.Second):
+		cancel()
+		t.Fatal("request-scoped discovery call did not reach the test server")
+	}
+	cancel()
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("discoveryForContext() call error = %v, want context cancellation", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("discoveryForContext() call did not stop after context cancellation")
 	}
 }
 

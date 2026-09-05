@@ -14,6 +14,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"golang.org/x/time/rate"
 	"k8s.io/client-go/rest"
 
 	mcpv1alpha1 "github.com/samuelsupe/supek8smcp/api/v1alpha1"
@@ -38,6 +39,10 @@ type App struct {
 	capabilities           *capabilityCodec
 	plans                  *PlanStore
 	semaphore              chan struct{}
+	admission              *requestAdmission
+	globalLimiter          *rate.Limiter
+	metrics                *runtimeMetrics
+	schemas                *schemaCache
 	rateLimiter            *identityRateLimiter
 	logger                 *slog.Logger
 	version                string
@@ -69,6 +74,12 @@ func NewApp(config runtimeconfig.Config, base *rest.Config, version string, logg
 	if err := runtimeconfig.Validate(config); err != nil {
 		return nil, fmt.Errorf("validate server configuration: %w", err)
 	}
+	registry := prometheus.NewRegistry()
+	metrics := newRuntimeMetrics(registry)
+	base = rest.CopyConfig(base)
+	base.Wrap(func(next http.RoundTripper) http.RoundTripper {
+		return &upstreamTransport{next: next, metrics: metrics}
+	})
 	authenticator, err := NewAuthenticator(
 		base,
 		config.Spec.Limits.RequestTimeout.Duration,
@@ -88,7 +99,6 @@ func NewApp(config runtimeconfig.Config, base *rest.Config, version string, logg
 	if err != nil {
 		return nil, err
 	}
-	registry := prometheus.NewRegistry()
 	toolCalls := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "supek8smcp_tool_calls_total", Help: "MCP tool calls by tool and result.",
 	}, []string{"tool", "result"})
@@ -99,19 +109,49 @@ func NewApp(config runtimeconfig.Config, base *rest.Config, version string, logg
 		Name: "supek8smcp_authentication_attempts_total", Help: "MCP authentication attempts by decision and stable reason.",
 	}, []string{"decision", "reason"})
 	rateLimitRejections := prometheus.NewCounterVec(prometheus.CounterOpts{
-		Name: "supek8smcp_rate_limit_rejections_total", Help: "Authenticated MCP requests rejected by the per-identity limiter.",
+		Name: "supek8smcp_rate_limit_rejections_total", Help: "MCP requests rejected by global rate or identity limits.",
 	}, []string{"reason"})
 	auditEvents := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "supek8smcp_audit_events_total", Help: "Security audit events by event, tool, decision, and stable reason.",
 	}, []string{"event", "tool", "decision", "reason"})
 	registry.MustRegister(toolCalls, toolDuration, authenticationAttempts, rateLimitRejections, auditEvents, prometheus.NewGoCollector())
-	return &App{
+	app := &App{
 		config: config, authenticator: authenticator, policy: NewPolicy(config), catalog: newCatalogCache(capabilities), capabilities: capabilities,
-		plans: NewPlanStore(1024), semaphore: make(chan struct{}, config.Spec.Limits.MaxConcurrent),
+		metrics: metrics, schemas: newSchemaCache(metrics), admission: newRequestAdmission(int(config.Spec.Limits.MaxConcurrent)),
+		globalLimiter: rate.NewLimiter(rate.Limit(float64(config.Spec.Limits.RequestsPerMinute)*float64(config.Spec.Limits.MaxConcurrent)/60), int(config.Spec.Limits.Burst*config.Spec.Limits.MaxConcurrent)),
+		plans:         NewPlanStore(1024), semaphore: make(chan struct{}, config.Spec.Limits.MaxConcurrent),
 		rateLimiter: newIdentityRateLimiter(config.Spec.Limits.RequestsPerMinute, config.Spec.Limits.Burst),
 		logger:      logger, version: version, registry: registry, toolCalls: toolCalls, toolDuration: toolDuration,
 		authenticationAttempts: authenticationAttempts, rateLimitRejections: rateLimitRejections, auditEvents: auditEvents,
-	}, nil
+	}
+	app.catalog.metrics = metrics
+	registry.MustRegister(
+		prometheus.NewGaugeFunc(prometheus.GaugeOpts{Name: "supek8smcp_schema_cache_bytes", Help: "Estimated retained OpenAPI document bytes."}, func() float64 {
+			app.schemas.mu.Lock()
+			defer app.schemas.mu.Unlock()
+			return float64(app.schemas.bytes)
+		}),
+		prometheus.NewGaugeFunc(prometheus.GaugeOpts{Name: "supek8smcp_active_streams", Help: "Currently admitted watch, followed log, exec and attach calls."}, func() float64 { return float64(len(app.admission.streams)) }),
+		prometheus.NewGaugeFunc(prometheus.GaugeOpts{Name: "supek8smcp_active_requests", Help: "Requests holding a concurrency slot."}, func() float64 { return float64(len(app.semaphore)) }),
+		prometheus.NewGaugeFunc(prometheus.GaugeOpts{Name: "supek8smcp_plan_store_bytes", Help: "Estimated bytes retained by pending plans, including expired plans awaiting pruning."}, func() float64 { app.plans.mu.Lock(); defer app.plans.mu.Unlock(); return float64(app.plans.usedBytes) }),
+		prometheus.NewGaugeFunc(prometheus.GaugeOpts{Name: "supek8smcp_catalog_age_seconds", Help: "Age of the last complete discovery snapshot; zero before the first load."}, func() float64 {
+			app.catalog.mu.Lock()
+			defer app.catalog.mu.Unlock()
+			if app.catalog.loadedAt.IsZero() {
+				return 0
+			}
+			return time.Since(app.catalog.loadedAt).Seconds()
+		}),
+		prometheus.NewGaugeFunc(prometheus.GaugeOpts{Name: "supek8smcp_catalog_degraded", Help: "Whether the most recent discovery refresh failed or was partial."}, func() float64 {
+			app.catalog.mu.Lock()
+			defer app.catalog.mu.Unlock()
+			if !app.catalog.retryAt.IsZero() {
+				return 1
+			}
+			return 0
+		}),
+	)
+	return app, nil
 }
 
 func (a *App) Serve(ctx context.Context, opts Options) error {

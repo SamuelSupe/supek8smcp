@@ -88,7 +88,7 @@ func normalizeToolError(err error) toolErrorOutput {
 
 func retryableErrorCode(code string) bool {
 	switch code {
-	case "kubernetes_conflict", "kubernetes_throttled", "kubernetes_timeout", "kubernetes_unavailable", "deadline_exceeded":
+	case "stream_capacity", "kubernetes_conflict", "kubernetes_throttled", "kubernetes_timeout", "kubernetes_unavailable", "deadline_exceeded":
 		return true
 	default:
 		return false
