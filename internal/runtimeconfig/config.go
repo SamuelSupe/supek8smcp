@@ -5,7 +5,8 @@ import (
 	"fmt"
 	"os"
 	"slices"
-	"time"
+
+	corev1 "k8s.io/api/core/v1"
 
 	mcpv1alpha1 "github.com/samuelsupe/supek8smcp/api/v1alpha1"
 )
@@ -40,42 +41,10 @@ func Load(path string) (Config, error) {
 	if cfg.Name == "" || cfg.Namespace == "" {
 		return Config{}, fmt.Errorf("server config requires name and namespace")
 	}
-	if cfg.Spec.Mode == "" {
-		cfg.Spec.Mode = mcpv1alpha1.ModeReadOnly
-	}
-	if len(cfg.Spec.Scope.Namespaces) == 0 {
-		cfg.Spec.Scope.Namespaces = []string{cfg.Namespace}
-	}
-	if cfg.Spec.Policy.SensitiveReads == "" {
-		cfg.Spec.Policy.SensitiveReads = mcpv1alpha1.SensitiveReadRedact
-	}
-	if cfg.Spec.Limits.RequestTimeout.Duration == 0 {
-		cfg.Spec.Limits.RequestTimeout.Duration = 30 * time.Second
-	}
-	if cfg.Spec.Limits.StreamTimeout.Duration == 0 {
-		cfg.Spec.Limits.StreamTimeout.Duration = 60 * time.Second
-	}
-	if cfg.Spec.Limits.ExecTimeout.Duration == 0 {
-		cfg.Spec.Limits.ExecTimeout.Duration = 30 * time.Second
-	}
-	if cfg.Spec.Limits.MaxInputBytes == 0 {
-		cfg.Spec.Limits.MaxInputBytes = 256 << 10
-	}
-	if cfg.Spec.Limits.MaxOutputBytes == 0 {
-		cfg.Spec.Limits.MaxOutputBytes = 1 << 20
-	}
-	if cfg.Spec.Limits.MaxListItems == 0 {
-		cfg.Spec.Limits.MaxListItems = 100
-	}
-	if cfg.Spec.Limits.MaxConcurrent == 0 {
-		cfg.Spec.Limits.MaxConcurrent = 4
-	}
-	if cfg.Spec.Limits.RequestsPerMinute == 0 {
-		cfg.Spec.Limits.RequestsPerMinute = 120
-	}
-	if cfg.Spec.Limits.Burst == 0 {
-		cfg.Spec.Limits.Burst = 20
-	}
+	resource := &mcpv1alpha1.KubernetesMCPServer{Spec: cfg.Spec}
+	resource.Namespace = cfg.Namespace
+	resource.Default()
+	cfg.Spec = resource.Spec
 	if err := Validate(cfg); err != nil {
 		return Config{}, err
 	}
@@ -136,6 +105,27 @@ func Validate(cfg Config) error {
 	}
 	if cfg.Spec.Limits.Burst < 1 || cfg.Spec.Limits.Burst > 1000 {
 		return fmt.Errorf("burst must be between 1 and 1000")
+	}
+	resources := cfg.Spec.ServerResources()
+	for name, request := range resources.Requests {
+		if request.Sign() < 0 {
+			return fmt.Errorf("resource request %s must not be negative", name)
+		}
+		if limit, ok := resources.Limits[name]; ok && request.Cmp(limit) > 0 {
+			return fmt.Errorf("resource request %s exceeds its limit", name)
+		}
+	}
+	for name, limit := range resources.Limits {
+		if limit.Sign() <= 0 {
+			return fmt.Errorf("resource limit %s must be positive", name)
+		}
+	}
+	// Reserve space for plans, schema cache, and process overhead, plus decoded
+	// upstream objects and serialization copies for every concurrent request.
+	required := int64(128<<20) + int64(cfg.Spec.Limits.MaxConcurrent)*(16<<20+4*(cfg.Spec.Limits.MaxInputBytes+cfg.Spec.Limits.MaxOutputBytes))
+	memory := resources.Limits[corev1.ResourceMemory]
+	if memory.Value() < required {
+		return fmt.Errorf("server memory limit must be at least %d bytes for the configured concurrency and input/output budgets", required)
 	}
 	return nil
 }

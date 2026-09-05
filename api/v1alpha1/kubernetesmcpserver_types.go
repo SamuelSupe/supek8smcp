@@ -3,6 +3,8 @@ package v1alpha1
 import (
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -101,6 +103,9 @@ type NetworkPolicySpec struct {
 }
 
 type KubernetesMCPServerSpec struct {
+	// Resources configures the Server pod. Omitted CPU and memory entries use
+	// 50m/64Mi requests and 500m/256Mi limits. Memory must cover request budgets.
+	Resources corev1.ResourceRequirements `json:"resources,omitempty"`
 	// +kubebuilder:default:=ReadOnly
 	Mode AccessMode `json:"mode,omitempty"`
 	// +kubebuilder:default:={}
@@ -204,4 +209,25 @@ func (s *KubernetesMCPServer) ServerLabels() map[string]string {
 		"app.kubernetes.io/instance":   s.Name,
 		"app.kubernetes.io/managed-by": "supek8smcp-operator",
 	}
+}
+
+func (s KubernetesMCPServerSpec) ServerResources() corev1.ResourceRequirements {
+	resources := *s.Resources.DeepCopy()
+	if resources.Requests == nil {
+		resources.Requests = corev1.ResourceList{}
+	}
+	if resources.Limits == nil {
+		resources.Limits = corev1.ResourceList{}
+	}
+	for name, value := range map[corev1.ResourceName]string{corev1.ResourceCPU: "50m", corev1.ResourceMemory: "64Mi"} {
+		if _, ok := resources.Requests[name]; !ok {
+			resources.Requests[name] = resource.MustParse(value)
+		}
+	}
+	for name, value := range map[corev1.ResourceName]string{corev1.ResourceCPU: "500m", corev1.ResourceMemory: "256Mi"} {
+		if _, ok := resources.Limits[name]; !ok {
+			resources.Limits[name] = resource.MustParse(value)
+		}
+	}
+	return resources
 }

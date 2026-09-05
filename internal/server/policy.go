@@ -8,6 +8,7 @@ import (
 	"slices"
 
 	authorizationv1 "k8s.io/api/authorization/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
@@ -90,6 +91,31 @@ func (p *Policy) Check(action Action, namespace string) error {
 }
 
 func (p *Policy) Authorize(ctx context.Context, principal *Principal, action Action, namespace, name string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	key := authorizationKey{action.GVR.Group, action.GVR.Version, action.GVR.Resource, action.Subresource, action.Verb, namespace, name}
+	cache, _ := ctx.Value(authorizationCacheKey{}).(map[authorizationKey]error)
+	if cached, ok := cache[key]; ok {
+		return cached
+	}
+	err := p.authorize(ctx, principal, action, namespace, name)
+	if cache != nil {
+		cache[key] = err
+	}
+	return err
+}
+
+type authorizationKey struct{ group, version, resource, subresource, verb, namespace, name string }
+type authorizationCacheKey struct{}
+
+// Search is sequential and this cache lives only for that one search. Commits
+// always issue fresh authorization reviews, including after a plan was created.
+func withAuthorizationCache(ctx context.Context) context.Context {
+	return context.WithValue(ctx, authorizationCacheKey{}, make(map[authorizationKey]error))
+}
+
+func (p *Policy) authorize(ctx context.Context, principal *Principal, action Action, namespace, name string) error {
 	review, err := principal.Kubernetes.AuthorizationV1().SelfSubjectAccessReviews().Create(ctx, &authorizationv1.SelfSubjectAccessReview{
 		Spec: authorizationv1.SelfSubjectAccessReviewSpec{ResourceAttributes: &authorizationv1.ResourceAttributes{
 			Group:       action.GVR.Group,
@@ -104,6 +130,9 @@ func (p *Policy) Authorize(ctx context.Context, principal *Principal, action Act
 		return fmt.Errorf("SelfSubjectAccessReview failed: %w", err)
 	}
 	if !review.Status.Allowed {
+		if review.Status.EvaluationError != "" {
+			return apierrors.NewServiceUnavailable("Kubernetes authorization evaluation failed")
+		}
 		reason := review.Status.Reason
 		if reason == "" {
 			reason = "Kubernetes RBAC denied the operation"

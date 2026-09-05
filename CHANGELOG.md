@@ -2,6 +2,33 @@
 
 All notable changes to supek8smcp are documented here. This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) conventions. The repository currently records releases from v0.1.0 onward; no earlier version history is implied.
 
+## [0.5.0] - 2026-09-05
+
+### Added
+
+- Configurable Server pod `spec.resources`, with CPU/memory defaults and cross-validation of the memory limit against concurrency and input/output budgets.
+- Pre-authentication global rate limiting and per-identity concurrent request limits. Streaming operations reserve one global request slot for ordinary calls.
+- Credential- and subject-isolated OpenAPI document caching, with a five-minute TTL, a 64-entry limit, and an estimated 32 MiB memory budget.
+- Prometheus metrics for request queue and upstream stage latency, upstream request counts, cache outcomes, active requests/streams, plan/cache bytes, and catalog age/degradation.
+
+### Changed
+
+- Discovery refreshes now honor request cancellation, including waiting for an in-progress refresh, and back off for five seconds after a failed or partial refresh. Existing complete snapshots remain available during discovery failures.
+- Identical SelfSubjectAccessReviews are reused only within one search; planning and commit continue to perform fresh authorization checks.
+- Each identity may occupy at most `ceil(maxConcurrent / 2)` request slots. Watch, followed logs, and exec/attach together are limited to `maxConcurrent - 1` slots.
+
+### Fixed
+
+- Search no longer hides authorization service outages, evaluation failures, or request cancellation as successful empty results.
+- Stream-capacity rejection occurs before consuming a remote plan, so a busy server can be retried with the original approved plan.
+- Streaming read authorization and default-container resolution are included in the stream timeout.
+
+### Upgrade notes
+
+- Apply the v0.5.0 CRD before upgrading the Operator; Helm does not upgrade existing CRDs automatically.
+- `maxConcurrent: 1` now disables streaming with non-retryable `stream_disabled`; set it to at least `2` to use watch, followed logs, or exec/attach.
+- Server memory limits must cover `128 MiB + maxConcurrent × (16 MiB + 4 × (maxInputBytes + maxOutputBytes))`. Default budgets require 212 MiB and remain valid with the default 256 MiB limit. Increase `spec.resources.limits.memory` for larger budgets; this sizing check does not replace workload testing.
+
 ## [0.4.0] - 2026-08-25
 
 ### Added
@@ -99,6 +126,7 @@ All notable changes to supek8smcp are documented here. This project follows [Kee
 
 - No OAuth, port-forward, `cp`, proxy, evict, drain, TTY, JSON-RPC batch, multi-cluster routing, or multi-replica Server support.
 
+[0.5.0]: https://github.com/SamuelSupe/supek8smcp/releases/tag/v0.5.0
 [0.4.0]: https://github.com/SamuelSupe/supek8smcp/releases/tag/v0.4.0
 [0.3.0]: https://github.com/SamuelSupe/supek8smcp/releases/tag/v0.3.0
 [0.2.0]: https://github.com/SamuelSupe/supek8smcp/releases/tag/v0.2.0

@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"slices"
 	"sort"
@@ -29,12 +30,16 @@ type catalogSearchFilter struct {
 }
 
 type catalogCache struct {
-	mu        sync.Mutex
-	refreshMu sync.Mutex
-	loadedAt  time.Time
-	items     []Capability
-	cacheTime time.Duration
-	codec     *capabilityCodec
+	mu          sync.Mutex
+	refreshing  chan struct{}
+	retryAt     time.Time
+	lastError   error
+	lastPartial []Capability
+	metrics     *runtimeMetrics
+	loadedAt    time.Time
+	items       []Capability
+	cacheTime   time.Duration
+	codec       *capabilityCodec
 }
 
 func newCatalogCache(codec *capabilityCodec) *catalogCache {
@@ -42,30 +47,70 @@ func newCatalogCache(codec *capabilityCodec) *catalogCache {
 }
 
 func (c *catalogCache) list(ctx context.Context, principal *Principal) ([]Capability, error) {
-	c.mu.Lock()
-	if time.Since(c.loadedAt) < c.cacheTime && len(c.items) > 0 {
-		items := append([]Capability(nil), c.items...)
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		c.mu.Lock()
+		if time.Since(c.loadedAt) < c.cacheTime && !c.loadedAt.IsZero() {
+			items := append([]Capability(nil), c.items...)
+			c.mu.Unlock()
+			c.metrics.cache("catalog", "hit")
+			return items, nil
+		}
+		if time.Now().Before(c.retryAt) {
+			items, err := append([]Capability(nil), c.lastPartial...), c.lastError
+			if c.lastPartial != nil {
+				err = nil
+			}
+			if !c.loadedAt.IsZero() {
+				items, err = append([]Capability(nil), c.items...), nil
+			}
+			c.mu.Unlock()
+			c.metrics.cache("catalog", "backoff")
+			return items, err
+		}
+		if pending := c.refreshing; pending != nil {
+			c.mu.Unlock()
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-pending:
+				continue
+			}
+		}
+		c.refreshing = make(chan struct{})
 		c.mu.Unlock()
-		return items, nil
+		break
 	}
-	stale := append([]Capability(nil), c.items...)
-	c.mu.Unlock()
-
-	c.refreshMu.Lock()
-	defer c.refreshMu.Unlock()
-	c.mu.Lock()
-	if time.Since(c.loadedAt) < c.cacheTime && len(c.items) > 0 {
-		items := append([]Capability(nil), c.items...)
+	defer func() {
+		c.mu.Lock()
+		close(c.refreshing)
+		c.refreshing = nil
 		c.mu.Unlock()
-		return items, nil
+	}()
+	c.metrics.cache("catalog", "miss")
+	started := time.Now()
+	defer c.metrics.observe("catalog_refresh", started)
+	discoveryClient, err := principal.discoveryForContext(ctx)
+	if err != nil {
+		return nil, err
 	}
-	stale = append([]Capability(nil), c.items...)
-	c.mu.Unlock()
-
-	groups, discovered, err := principal.Discovery.ServerGroupsAndResources()
+	groups, discovered, err := discoveryClient.ServerGroupsAndResources()
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
 	resources := preferredResourceLists(groups, discovered)
 	if err != nil {
-		if len(stale) > 0 {
+		c.mu.Lock()
+		c.retryAt = time.Now().Add(5 * time.Second)
+		c.lastError = fmt.Errorf("discover Kubernetes resources: %w", err)
+		c.lastPartial = nil
+		stale := append([]Capability(nil), c.items...)
+		hasSnapshot := !c.loadedAt.IsZero()
+		c.mu.Unlock()
+		c.metrics.cache("catalog", "refresh_error")
+		if hasSnapshot {
 			return stale, nil
 		}
 		if len(resources) == 0 {
@@ -179,6 +224,14 @@ func (c *catalogCache) list(ctx context.Context, principal *Principal) ([]Capabi
 		c.codec.retain(retained)
 		c.items = capabilities
 		c.loadedAt = time.Now()
+		c.retryAt = time.Time{}
+		c.lastError = nil
+		c.lastPartial = nil
+		c.mu.Unlock()
+	}
+	if err != nil {
+		c.mu.Lock()
+		c.lastPartial = append([]Capability{}, capabilities...)
 		c.mu.Unlock()
 	}
 	return append([]Capability(nil), capabilities...), nil
@@ -221,6 +274,10 @@ func searchCatalog(
 	cursor string,
 	limit int64,
 ) ([]Capability, string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, "", err
+	}
+	ctx = withAuthorizationCache(ctx)
 	query := strings.ToLower(strings.TrimSpace(filter.Query))
 	wantedAction := strings.TrimSpace(filter.Action)
 	wantedGroup := strings.TrimSpace(filter.APIGroup)
@@ -261,6 +318,9 @@ func searchCatalog(
 	index := start
 	authorizationChecks := 0
 	for index < len(filtered) && int64(len(result)) < limit {
+		if err := ctx.Err(); err != nil {
+			return nil, "", err
+		}
 		capability := filtered[index]
 		action := capability.AsAction()
 		targetNamespace := filter.Namespace
@@ -273,6 +333,10 @@ func searchCatalog(
 		authorizationChecks++
 		index++
 		if err := policy.CheckAndAuthorizeOperation(ctx, principal, action, targetNamespace, filter.Name); err != nil {
+			var denied *toolError
+			if !errors.As(err, &denied) {
+				return nil, "", err
+			}
 			continue
 		}
 		result = append(result, capability)
@@ -280,6 +344,9 @@ func searchCatalog(
 	next := ""
 	if index < len(filtered) {
 		next = encodeCursor(index)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, "", err
 	}
 	return result, next, nil
 }

@@ -111,6 +111,15 @@ type CommitOutput struct {
 }
 
 func (a *App) commit(ctx context.Context, request *mcp.CallToolRequest, principal *Principal, input CommitInput) (CommitOutput, error) {
+	// Reserve stream capacity before consuming a one-time remote plan so a
+	// busy server can be retried without losing the approved plan.
+	if a.plans.isRemote(input.PlanID, principal.SubjectKey()) {
+		release, err := a.acquireStream()
+		if err != nil {
+			return CommitOutput{}, err
+		}
+		defer release()
+	}
 	operation, err := a.plans.Consume(input.PlanID, principal.SubjectKey(), input.ConfirmationCode)
 	if err != nil {
 		return CommitOutput{}, err

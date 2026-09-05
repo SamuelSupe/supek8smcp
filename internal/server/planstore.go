@@ -191,3 +191,10 @@ func (s *PlanStore) delete(id string, plan storedPlan) {
 		s.subjectBytes[plan.SubjectKey] = remaining
 	}
 }
+
+func (s *PlanStore) isRemote(id, subject string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	plan, ok := s.plans[id]
+	return ok && plan.SubjectKey == subject && (plan.Operation.Action.Action == "exec" || plan.Operation.Action.Action == "attach")
+}

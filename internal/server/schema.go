@@ -17,6 +17,10 @@ func schemaForCapability(principal *Principal, capability Capability, fieldPath 
 	if err != nil {
 		return nil, fmt.Errorf("load OpenAPI v3 schema: %w", err)
 	}
+	return schemaFromDocument(document, capability, fieldPath, depth)
+}
+
+func schemaFromDocument(document map[string]any, capability Capability, fieldPath string, depth int) (any, error) {
 	components, _ := document["components"].(map[string]any)
 	schemas, _ := components["schemas"].(map[string]any)
 	var selected map[string]any

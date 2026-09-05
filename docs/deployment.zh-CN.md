@@ -16,9 +16,9 @@ MCP 客户端通过 HTTPS Streamable HTTP 访问它。示例假设使用 `kubect
   `tokenreviews.create`，也不会代持客户端 Bearer Token。Operator 会校验固定角色
   不是聚合角色且不含任何额外规则；角色缺失、不可校验、被扩权，或已有绑定
   指向其他角色时会撤掉异常绑定并报告 `AuthReady=False`。
-- 默认的 v0.4.0 镜像 `ghcr.io/samuelsupe/supek8smcp:0.4.0` 是公开的。Operator 命名空间
+- 默认的 v0.5.0 镜像 `ghcr.io/samuelsupe/supek8smcp:0.5.0` 是公开的。Operator 命名空间
   以及每个 KMCP 端点命名空间中的 Pod 都必须能够拉取同一个镜像。若使用私有镜像，
-  v0.4.0 chart 不会向生成的 Server Pod 分发或复制 registry 凭据；请通过节点运行时凭据
+  v0.5.0 chart 不会向生成的 Server Pod 分发或复制 registry 凭据；请通过节点运行时凭据
   或其他集群机制，确保 Operator Pod 与所有生成的 Server Pod 都能拉取该镜像。
 - MCP 客户端支持 Streamable HTTP、Bearer header 和自定义 CA。
 
@@ -27,7 +27,7 @@ MCP 客户端通过 HTTPS Streamable HTTP 访问它。示例假设使用 `kubect
 从源码构建并发布镜像：
 
 ```bash
-export IMG=registry.example.com/platform/supek8smcp:0.4.0
+export IMG=registry.example.com/platform/supek8smcp:0.5.0
 make docker-build IMG="$IMG"
 docker push "$IMG"
 ```
@@ -74,22 +74,24 @@ Ready；`/healthz` 仍然只负责存活检查。
 
 ## 使用 Helm 安装
 
-v0.4.0 chart 发布在 GitHub Release。首次安装或升级已有 release 都使用同一条命令：
+v0.5.0 chart 发布在 GitHub Release。首次安装或升级已有 release 都使用同一条命令：
 
 ```bash
 helm upgrade --install supek8smcp \
-  https://github.com/SamuelSupe/supek8smcp/releases/download/v0.4.0/supek8smcp-0.4.0.tgz \
+  https://github.com/SamuelSupe/supek8smcp/releases/download/v0.5.0/supek8smcp-0.5.0.tgz \
   --namespace supek8smcp-system --create-namespace
 kubectl -n supek8smcp-system rollout status deploy/supek8smcp
 kubectl -n supek8smcp-system get deploy,pods
 ```
 
-chart 默认将 `image.tag` 设为 `appVersion`，因此 v0.4.0 会拉取
-`ghcr.io/samuelsupe/supek8smcp:0.4.0`。该镜像发布为 Linux amd64/arm64 多架构
+chart 默认将 `image.tag` 设为 `appVersion`，因此 v0.5.0 会拉取
+`ghcr.io/samuelsupe/supek8smcp:0.5.0`。该镜像发布为 Linux amd64/arm64 多架构
 manifest，节点运行时会自动选择匹配的架构。只有使用另行发布的镜像时才需要覆盖
 `image.repository`、`image.tag` 或 `image.digest`。
 
-v0.4.0 扩展了读工具契约：list/watch 默认使用紧凑摘要，支持按名称约束以保持
+v0.5.0 新增 `spec.resources`、内存预算校验与身份/流式并发限制。升级前先应用下面的新 CRD；`maxConcurrent: 1` 禁止流式操作，高并发或大输出配置可能需要提高 Server 内存限制。默认配置仍满足预算要求。
+
+此前 v0.4.0 扩展了读工具契约：list/watch 默认使用紧凑摘要，支持按名称约束以保持
 `resourceNames` RBAC 语义，并可从 `resourceVersion` 续传，返回 bookmark 和有界错误诊断。
 annotations 和 managedFields 仍递归剔除，能力 ID 是进程内短 `cap_` 句柄；并发 discovery
 刷新共享一次加载，成功刷新期间保留已有句柄。需要完整列表对象的客户端必须显式发送
@@ -106,7 +108,7 @@ Helm 的 `crds/` 机制只会在首次 install 时创建 CRD，upgrade 不会升
 Established，之后才执行 Helm upgrade：
 
 ```bash
-kubectl apply -f https://raw.githubusercontent.com/SamuelSupe/supek8smcp/v0.4.0/config/crd/bases/mcp.supek8smcp.io_kubernetesmcpservers.yaml
+kubectl apply -f https://raw.githubusercontent.com/SamuelSupe/supek8smcp/v0.5.0/config/crd/bases/mcp.supek8smcp.io_kubernetesmcpservers.yaml
 kubectl wait --for=condition=Established --timeout=60s crd/kubernetesmcpservers.mcp.supek8smcp.io
 ```
 
@@ -350,6 +352,12 @@ kubectl -n platform logs deploy/platform-ops --tail=200 | \
 身份建立独立令牌桶；默认分别为 `120` 和 `20`。超过预算返回 HTTP `429`，并带
 `Retry-After`。现有 `maxConcurrent` 仍是 Server 的全局并发保护，两者同时生效。
 
+每个身份最多占用 `ceil(maxConcurrent / 2)` 个请求名额。watch、持续日志、exec/attach 合计最多占用 `maxConcurrent - 1` 个名额，给短请求保留容量；因此 `maxConcurrent: 1` 会以不可重试的 `stream_disabled` 拒绝这些流式操作。流容量不足返回可重试的 `stream_capacity`，远程计划尚未消费，可稍后重试原 commit。认证前还应用全局令牌桶，其每分钟请求数和 burst 分别为身份预算乘以 `maxConcurrent`；全局限流返回 `global_rate`，身份并发超限返回 `identity_concurrency`。
+
+`spec.resources.requests` / `spec.resources.limits` 可配置 Server Pod 的 Kubernetes 资源。未指定的 CPU/内存请求默认为 `50m` / `64Mi`，限制默认为 `500m` / `256Mi`。启动及 Operator 生成配置时，内存限制必须至少为 `128 MiB + maxConcurrent × (16 MiB + 4 × (maxInputBytes + maxOutputBytes))`；默认预算需要 212 MiB。这个保守容量校验为计划、schema 缓存、对象解码及序列化预留空间，并不替代工作负载压测。提高并发或字节预算时，需要相应提高 `spec.resources.limits.memory`；无效组合会报告配置错误。
+
+目录刷新受工具请求取消控制，失败后退避 5 秒，并在可用时返回旧的完整快照。搜索只跳过明确的策略/RBAC 拒绝，上游授权故障会返回错误；同次搜索复用相同 SSAR，commit 始终重新授权。OpenAPI 文档按身份及精确 Token 的哈希隔离缓存 5 分钟，最多 64 项、估算 32 MiB；缓存不保存 Token，describe 仍执行授权。
+
 Server 在 `9090/metrics` 暴露以下安全和可靠性指标：
 
 - `supek8smcp_authentication_attempts_total`
@@ -357,6 +365,12 @@ Server 在 `9090/metrics` 暴露以下安全和可靠性指标：
 - `supek8smcp_audit_events_total`
 - `supek8smcp_tool_calls_total`
 - `supek8smcp_tool_duration_seconds`
+- `supek8smcp_stage_duration_seconds`
+- `supek8smcp_upstream_requests_total`
+- `supek8smcp_cache_requests_total`
+- `supek8smcp_active_requests` / `supek8smcp_active_streams`
+- `supek8smcp_plan_store_bytes` / `supek8smcp_schema_cache_bytes`
+- `supek8smcp_catalog_age_seconds` / `supek8smcp_catalog_degraded`
 
 `supek8smcp_tool_calls_total` 的 `result` 明确区分 `ok`、策略/RBAC 拒绝的
 `denied` 和基础设施/执行失败的 `error`，因此可靠性告警不会把预期的权限拒绝

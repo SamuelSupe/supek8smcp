@@ -1,11 +1,14 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"reflect"
 	"testing"
+	"time"
 
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/openapi"
 	"k8s.io/client-go/openapi/openapitest"
@@ -42,6 +45,16 @@ func (d *schemaTestDiscovery) OpenAPIV3() openapi.Client {
 	return d.client
 }
 
+type countingSchemaOpenAPIClient struct {
+	openapi.Client
+	pathsCalls int
+}
+
+func (c *countingSchemaOpenAPIClient) Paths() (map[string]openapi.GroupVersion, error) {
+	c.pathsCalls++
+	return c.Client.Paths()
+}
+
 func newSchemaTestPrincipal(t *testing.T, document map[string]any) *Principal {
 	t.Helper()
 	data, err := json.Marshal(document)
@@ -55,6 +68,74 @@ func newSchemaTestPrincipal(t *testing.T, document map[string]any) *Principal {
 
 func schemaTestCapability() Capability {
 	return Capability{Group: "apps", Version: "v1", Kind: "Deployment"}
+}
+
+func TestSchemaCacheScopesByTokenAndExpiresEntries(t *testing.T) {
+	t.Parallel()
+
+	document := map[string]any{
+		"components": map[string]any{
+			"schemas": map[string]any{
+				"io.k8s.apps.v1.Deployment": map[string]any{
+					"type": "object",
+					"x-kubernetes-group-version-kind": []any{map[string]any{
+						"group": "apps", "version": "v1", "kind": "Deployment",
+					}},
+					"properties": map[string]any{"spec": map[string]any{"type": "object"}},
+				},
+			},
+		},
+	}
+	data, err := json.Marshal(document)
+	if err != nil {
+		t.Fatalf("marshal OpenAPI document: %v", err)
+	}
+	fakeClient := openapitest.NewFakeClient()
+	fakeClient.PathsMap["apis/apps/v1"] = openapitest.FakeGroupVersion{GVSpec: data}
+	countingClient := &countingSchemaOpenAPIClient{Client: fakeClient}
+	principal := &Principal{
+		Username: "alice", UID: "uid-1", Token: "token-a",
+		Discovery: &schemaTestDiscovery{client: countingClient},
+	}
+	cache := newSchemaCache(nil)
+	gv := schema.GroupVersion{Group: "apps", Version: "v1"}
+
+	first, err := cache.load(context.Background(), principal, gv)
+	if err != nil {
+		t.Fatalf("first schemaCache.load() error = %v", err)
+	}
+	second, err := cache.load(context.Background(), principal, gv)
+	if err != nil {
+		t.Fatalf("same-identity schemaCache.load() error = %v", err)
+	}
+	if !reflect.DeepEqual(second, first) {
+		t.Fatal("same token, subject, and group-version returned a different cached schema")
+	}
+	if countingClient.pathsCalls != 1 {
+		t.Fatalf("same-identity OpenAPI calls = %d, want one cache miss", countingClient.pathsCalls)
+	}
+
+	principal.Token = "token-b"
+	if _, err := cache.load(context.Background(), principal, gv); err != nil {
+		t.Fatalf("different-token schemaCache.load() error = %v", err)
+	}
+	if countingClient.pathsCalls != 2 {
+		t.Fatalf("different-token OpenAPI calls = %d, want a separate cache entry", countingClient.pathsCalls)
+	}
+
+	cache.mu.Lock()
+	for key, entry := range cache.entries {
+		entry.expires = time.Now().Add(-time.Second)
+		cache.entries[key] = entry
+	}
+	cache.mu.Unlock()
+	principal.Token = "token-a"
+	if _, err := cache.load(context.Background(), principal, gv); err != nil {
+		t.Fatalf("expired schemaCache.load() error = %v", err)
+	}
+	if countingClient.pathsCalls != 3 {
+		t.Fatalf("expired-entry OpenAPI calls = %d, want a reload", countingClient.pathsCalls)
+	}
 }
 
 func TestSchemaForCapabilityFieldPathPrunesSiblingBranches(t *testing.T) {

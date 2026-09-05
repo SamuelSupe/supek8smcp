@@ -41,9 +41,9 @@ func policyTestConfig(mode mcpv1alpha1.AccessMode, sensitive mcpv1alpha1.Sensiti
 			Scope:  mcpv1alpha1.ScopeSpec{Namespaces: []string{"workloads"}},
 			Policy: mcpv1alpha1.PolicySpec{SensitiveReads: sensitive},
 			Limits: mcpv1alpha1.LimitsSpec{
-				RequestTimeout: metav1.Duration{Duration: 30},
-				StreamTimeout:  metav1.Duration{Duration: 60},
-				ExecTimeout:    metav1.Duration{Duration: 30},
+				RequestTimeout: metav1.Duration{Duration: 30 * time.Second},
+				StreamTimeout:  metav1.Duration{Duration: 60 * time.Second},
+				ExecTimeout:    metav1.Duration{Duration: 30 * time.Second},
 				MaxInputBytes:  1 << 10, MaxOutputBytes: 1 << 10, MaxListItems: 1, MaxConcurrent: 1,
 			},
 		},
