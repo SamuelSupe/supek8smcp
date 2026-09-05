@@ -2,7 +2,20 @@
 
 All notable changes to supek8smcp are documented here. This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) conventions. The repository currently records releases from v0.1.0 onward; no earlier version history is implied.
 
+## [0.5.1] - 2026-09-05
+
+### Fixed
+
+- Docker builds no longer override BuildKit's target architecture with `amd64`. Linux ARM64 images now compile the executable for ARM64, with a build-time target-platform consistency check.
+
+### Release notes
+
+- This is the first completed release of the discovery, concurrency, resource-budget, and observability changes listed under v0.5.0 below. It includes the same CRD and concurrency upgrade requirements.
+- The v0.5.0 release workflow was cancelled before publishing GitHub Release attachments after verification found an x86-64 executable in its ARM64 image. The existing Git tag is retained; use v0.5.1 images and downloads.
+
 ## [0.5.0] - 2026-09-05
+
+Release candidate withdrawn before GitHub Release publication; superseded by v0.5.1.
 
 ### Added
 
@@ -126,7 +139,8 @@ All notable changes to supek8smcp are documented here. This project follows [Kee
 
 - No OAuth, port-forward, `cp`, proxy, evict, drain, TTY, JSON-RPC batch, multi-cluster routing, or multi-replica Server support.
 
-[0.5.0]: https://github.com/SamuelSupe/supek8smcp/releases/tag/v0.5.0
+[0.5.1]: https://github.com/SamuelSupe/supek8smcp/releases/tag/v0.5.1
+[0.5.0]: https://github.com/SamuelSupe/supek8smcp/tree/v0.5.0
 [0.4.0]: https://github.com/SamuelSupe/supek8smcp/releases/tag/v0.4.0
 [0.3.0]: https://github.com/SamuelSupe/supek8smcp/releases/tag/v0.3.0
 [0.2.0]: https://github.com/SamuelSupe/supek8smcp/releases/tag/v0.2.0
