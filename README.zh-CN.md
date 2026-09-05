@@ -12,28 +12,29 @@
 [![GHCR](https://img.shields.io/badge/GHCR-container-2496ED?logo=docker&logoColor=white)](https://github.com/samuelsupe/supek8smcp/pkgs/container/supek8smcp)
 [![Go](https://img.shields.io/badge/go-1.25.13-00ADD8?logo=go&logoColor=white)](go.mod)
 
-## v0.5.0 更新
+## v0.5.1 更新
 
 本版改善高并发下的可用性，并降低重复发现与授权的开销：
 
+- 修正多架构镜像构建参数，确保 ARM64 镜像包含真正的 ARM64 可执行文件。
 - 搜索只过滤明确的策略/RBAC 拒绝；授权服务故障和取消会返回错误，单次搜索复用相同授权检查，commit 仍实时复检。
 - 目录刷新支持请求取消和 5 秒失败退避；OpenAPI 按身份及 Token 哈希隔离缓存，具有 5 分钟有效期和容量限制。
 - 认证前全局限流、每身份并发限制，以及流式操作容量上限，为普通请求保留名额。流容量不足不会消费远程操作计划。
 - 新增 `spec.resources`，让 Server Pod 的 CPU/内存配置与请求预算匹配；新增阶段耗时、缓存、并发及计划存储指标。
 
-**升级须知：**先更新 CRD，再升级 Helm release。`maxConcurrent: 1` 会以 `stream_disabled` 拒绝 watch、持续日志和 exec/attach；需要这些能力时至少设为 `2`。高并发或较大的输入/输出预算可能需要提高 `spec.resources.limits.memory`，默认配置仍可使用 `256Mi`。详细规则见[部署指南](docs/deployment.zh-CN.md)，完整变更见 [CHANGELOG](CHANGELOG.md#050---2026-09-05)。
+**升级须知：**先更新 CRD，再升级 Helm release。`maxConcurrent: 1` 会以 `stream_disabled` 拒绝 watch、持续日志和 exec/attach；需要这些能力时至少设为 `2`。高并发或较大的输入/输出预算可能需要提高 `spec.resources.limits.memory`，默认配置仍可使用 `256Mi`。详细规则见[部署指南](docs/deployment.zh-CN.md)，完整变更见 [CHANGELOG](CHANGELOG.md#051---2026-09-05)。
 
-## v0.5.0 下载
+## v0.5.1 下载
 
-- [Linux x64（amd64）压缩包](https://github.com/SamuelSupe/supek8smcp/releases/download/v0.5.0/supek8smcp_0.5.0_linux_amd64.tar.gz)
-- [Linux ARM64 压缩包](https://github.com/SamuelSupe/supek8smcp/releases/download/v0.5.0/supek8smcp_0.5.0_linux_arm64.tar.gz)
-- [SHA-256 校验和](https://github.com/SamuelSupe/supek8smcp/releases/download/v0.5.0/checksums.txt)
+- [Linux x64（amd64）压缩包](https://github.com/SamuelSupe/supek8smcp/releases/download/v0.5.1/supek8smcp_0.5.1_linux_amd64.tar.gz)
+- [Linux ARM64 压缩包](https://github.com/SamuelSupe/supek8smcp/releases/download/v0.5.1/supek8smcp_0.5.1_linux_arm64.tar.gz)
+- [SHA-256 校验和](https://github.com/SamuelSupe/supek8smcp/releases/download/v0.5.1/checksums.txt)
 
 直接从 GitHub Release 安装或升级 Operator chart：
 
 ```bash
-kubectl apply -f https://raw.githubusercontent.com/SamuelSupe/supek8smcp/v0.5.0/config/crd/bases/mcp.supek8smcp.io_kubernetesmcpservers.yaml
-helm upgrade --install supek8smcp https://github.com/SamuelSupe/supek8smcp/releases/download/v0.5.0/supek8smcp-0.5.0.tgz \
+kubectl apply -f https://raw.githubusercontent.com/SamuelSupe/supek8smcp/v0.5.1/config/crd/bases/mcp.supek8smcp.io_kubernetesmcpservers.yaml
+helm upgrade --install supek8smcp https://github.com/SamuelSupe/supek8smcp/releases/download/v0.5.1/supek8smcp-0.5.1.tgz \
   --namespace supek8smcp-system --create-namespace
 ```
 
@@ -117,7 +118,7 @@ flowchart LR
 
 ```bash
 make install
-make deploy IMG=ghcr.io/your-org/supek8smcp:0.5.0
+make deploy IMG=ghcr.io/your-org/supek8smcp:0.5.1
 kubectl create namespace supek8smcp-servers
 ```
 
@@ -157,7 +158,7 @@ kubectl -n supek8smcp-servers get svc -l app.kubernetes.io/instance=team-readonl
 构建并发布不可变镜像，然后安装 CRD 和 Operator：
 
 ```bash
-export IMG=registry.example.com/platform/supek8smcp:0.5.0
+export IMG=registry.example.com/platform/supek8smcp:0.5.1
 make docker-build IMG="$IMG"
 docker push "$IMG"
 make install
@@ -179,7 +180,7 @@ make fmt
 make vet
 make test
 make build
-make docker-build IMG=ghcr.io/your-org/supek8smcp:0.5.0
+make docker-build IMG=ghcr.io/your-org/supek8smcp:0.5.1
 ```
 
 API 类型变更时使用 `make manifests`，审查生成的 YAML，不要手工修改。发布镜像应使用不可变 tag 或 digest，并通过仓库的 release 自动化发布。提交改动或报告漏洞前请阅读 [`CHANGELOG.md`](CHANGELOG.md)、[`CONTRIBUTING.md`](CONTRIBUTING.md) 和 [`SECURITY.md`](SECURITY.md)。

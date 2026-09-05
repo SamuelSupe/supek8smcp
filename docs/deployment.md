@@ -7,7 +7,7 @@ This guide installs the `supek8smcp` Operator, creates a `KubernetesMCPServer`, 
 - A Kubernetes cluster and a `kubectl` version that supports `kubectl create token` (use an equivalent short-lived ServiceAccount token flow on older clusters).
 - Administrator permission to install the CRD and create namespaces, RBAC, Deployments, Services, ConfigMaps, Secrets, and NetworkPolicies.
 - The deployment manifests must provide the fixed `supek8smcp-tokenreviewer` ClusterRole. It lets a Server ServiceAccount create TokenReviews; the Operator creates one corresponding ClusterRoleBinding per CR. The Operator ClusterRole may only `get` and `bind` that fixed `resourceName`; it does not have `tokenreviews.create` and never holds a client Bearer token. The Operator verifies that the role is not aggregated and contains no extra rules. If the role is missing, unverifiable, expanded, or an existing binding points at another role, abnormal bindings are removed and `AuthReady=False` is reported.
-- The default v0.5.0 image, `ghcr.io/samuelsupe/supek8smcp:0.5.0`, is public. Pods in the Operator namespace and in every KMCP endpoint namespace must be able to pull that same image. For a private image, the v0.5.0 chart does not distribute or copy registry credentials into generated Server Pods; use node-runtime credentials or another cluster mechanism that lets both the Operator and every generated Server Pod pull it.
+- The default v0.5.1 image, `ghcr.io/samuelsupe/supek8smcp:0.5.1`, is public. Pods in the Operator namespace and in every KMCP endpoint namespace must be able to pull that same image. For a private image, the v0.5.1 chart does not distribute or copy registry credentials into generated Server Pods; use node-runtime credentials or another cluster mechanism that lets both the Operator and every generated Server Pod pull it.
 - An MCP client that supports Streamable HTTP, a Bearer header, and a custom CA.
 
 ## Install the Operator
@@ -15,7 +15,7 @@ This guide installs the `supek8smcp` Operator, creates a `KubernetesMCPServer`, 
 Build and publish an image:
 
 ```bash
-export IMG=registry.example.com/platform/supek8smcp:0.5.0
+export IMG=registry.example.com/platform/supek8smcp:0.5.1
 make docker-build IMG="$IMG"
 docker push "$IMG"
 ```
@@ -45,19 +45,19 @@ Deleting the CRD deletes its custom resources and Operator-managed workloads. Ba
 
 ## Install with Helm
 
-The v0.5.0 chart is available from the GitHub Release. Install it, or run the same command to upgrade an existing release:
+The v0.5.1 chart is available from the GitHub Release. Install it, or run the same command to upgrade an existing release:
 
 ```bash
 helm upgrade --install supek8smcp \
-  https://github.com/SamuelSupe/supek8smcp/releases/download/v0.5.0/supek8smcp-0.5.0.tgz \
+  https://github.com/SamuelSupe/supek8smcp/releases/download/v0.5.1/supek8smcp-0.5.1.tgz \
   --namespace supek8smcp-system --create-namespace
 kubectl -n supek8smcp-system rollout status deploy/supek8smcp
 kubectl -n supek8smcp-system get deploy,pods
 ```
 
-The chart defaults `image.tag` to `appVersion`, so v0.5.0 pulls `ghcr.io/samuelsupe/supek8smcp:0.5.0`. That image is published as a Linux amd64/arm64 multi-architecture manifest; the node runtime selects the matching architecture automatically. Override `image.repository`, `image.tag`, or `image.digest` only when using a separately published image.
+The chart defaults `image.tag` to `appVersion`, so v0.5.1 pulls `ghcr.io/samuelsupe/supek8smcp:0.5.1`. That image is published as a Linux amd64/arm64 multi-architecture manifest; the node runtime selects the matching architecture automatically. Override `image.repository`, `image.tag`, or `image.digest` only when using a separately published image.
 
-v0.5.0 adds `spec.resources`, memory-budget validation, and identity/streaming concurrency limits. Apply the new CRD below before upgrading. `maxConcurrent: 1` disables streaming, and high-concurrency or large-output configurations may need a higher Server memory limit. Default configurations still satisfy the budget.
+v0.5.1 adds `spec.resources`, memory-budget validation, and identity/streaming concurrency limits. Apply the new CRD below before upgrading. `maxConcurrent: 1` disables streaming, and high-concurrency or large-output configurations may need a higher Server memory limit. Default configurations still satisfy the budget.
 
 The preceding v0.4.0 release extended the read-tool contract: list/watch use compact summaries by default, accept a name-scoped selector for `resourceNames` RBAC, and can resume from `resourceVersion` with bookmark and bounded error diagnostics. Annotations and managed fields are omitted recursively, and capability IDs are short process-local `cap_` handles; concurrent discovery refreshes share one load and retain existing handles during a successful refresh. Clients that require complete list objects must send `outputMode: full`, and clients must call `k8s.search` again after a Server restart. Explicitly requested annotations still redact credential-like keys and assignments. When `container` is omitted, logs and Dangerous exec/attach use the default-container annotation or first regular container and require Pod `get` permission; continuous logs and remote output remain bounded.
 
@@ -66,7 +66,7 @@ v0.2.0 changes the write-tool contract: every SafeWrite/Dangerous `k8s.commit` n
 Helm's `crds/` mechanism creates the CRD only on the first install; Helm does not upgrade CRDs. Before a chart version upgrade, apply the matching CRD from that release tag/raw URL or from downloaded source, then confirm it is Established before running the Helm upgrade:
 
 ```bash
-kubectl apply -f https://raw.githubusercontent.com/SamuelSupe/supek8smcp/v0.5.0/config/crd/bases/mcp.supek8smcp.io_kubernetesmcpservers.yaml
+kubectl apply -f https://raw.githubusercontent.com/SamuelSupe/supek8smcp/v0.5.1/config/crd/bases/mcp.supek8smcp.io_kubernetesmcpservers.yaml
 kubectl wait --for=condition=Established --timeout=60s crd/kubernetesmcpservers.mcp.supek8smcp.io
 ```
 

@@ -12,28 +12,29 @@ Turn a namespaced custom resource into a single-replica, HTTPS Streamable HTTP M
 [![GHCR](https://img.shields.io/badge/GHCR-container-2496ED?logo=docker&logoColor=white)](https://github.com/samuelsupe/supek8smcp/pkgs/container/supek8smcp)
 [![Go](https://img.shields.io/badge/go-1.25.13-00ADD8?logo=go&logoColor=white)](go.mod)
 
-## What's new in v0.5.0
+## What's new in v0.5.1
 
 This release improves availability under concurrency and reduces repeated discovery and authorization work:
 
+- Multi-platform container builds now use BuildKit target values, so the ARM64 image contains an ARM64 executable.
 - Search filters only explicit policy/RBAC denials and propagates authorization service failures and cancellation. Identical reviews are reused within one search; commits always reauthorize.
 - Catalog refresh supports request cancellation and a five-second failure backoff. OpenAPI caching is isolated by reviewed identity and token hash, with a five-minute TTL and bounded capacity.
 - A pre-authentication global rate limit, per-identity concurrency limits, and a streaming cap reserve capacity for ordinary requests. A busy stream gate does not consume a remote operation plan.
 - New `spec.resources` settings align Server pod CPU/memory with request budgets. New metrics cover stage latency, caches, concurrency, and plan storage.
 
-**Upgrade notes:** update the CRD before upgrading the Helm release. `maxConcurrent: 1` rejects watch, followed logs, and exec/attach with `stream_disabled`; configure at least `2` to use these operations. Higher concurrency or input/output budgets may require increasing `spec.resources.limits.memory`; defaults still fit `256Mi`. See the [deployment guide](docs/deployment.md) for budget rules and the [changelog](CHANGELOG.md#050---2026-09-05) for all changes.
+**Upgrade notes:** update the CRD before upgrading the Helm release. `maxConcurrent: 1` rejects watch, followed logs, and exec/attach with `stream_disabled`; configure at least `2` to use these operations. Higher concurrency or input/output budgets may require increasing `spec.resources.limits.memory`; defaults still fit `256Mi`. See the [deployment guide](docs/deployment.md) for budget rules and the [changelog](CHANGELOG.md#051---2026-09-05) for all changes.
 
-## v0.5.0 downloads
+## v0.5.1 downloads
 
-- [Linux x64 (amd64) archive](https://github.com/SamuelSupe/supek8smcp/releases/download/v0.5.0/supek8smcp_0.5.0_linux_amd64.tar.gz)
-- [Linux ARM64 archive](https://github.com/SamuelSupe/supek8smcp/releases/download/v0.5.0/supek8smcp_0.5.0_linux_arm64.tar.gz)
-- [SHA-256 checksums](https://github.com/SamuelSupe/supek8smcp/releases/download/v0.5.0/checksums.txt)
+- [Linux x64 (amd64) archive](https://github.com/SamuelSupe/supek8smcp/releases/download/v0.5.1/supek8smcp_0.5.1_linux_amd64.tar.gz)
+- [Linux ARM64 archive](https://github.com/SamuelSupe/supek8smcp/releases/download/v0.5.1/supek8smcp_0.5.1_linux_arm64.tar.gz)
+- [SHA-256 checksums](https://github.com/SamuelSupe/supek8smcp/releases/download/v0.5.1/checksums.txt)
 
 Install or upgrade the Operator chart directly from the GitHub Release:
 
 ```bash
-kubectl apply -f https://raw.githubusercontent.com/SamuelSupe/supek8smcp/v0.5.0/config/crd/bases/mcp.supek8smcp.io_kubernetesmcpservers.yaml
-helm upgrade --install supek8smcp https://github.com/SamuelSupe/supek8smcp/releases/download/v0.5.0/supek8smcp-0.5.0.tgz \
+kubectl apply -f https://raw.githubusercontent.com/SamuelSupe/supek8smcp/v0.5.1/config/crd/bases/mcp.supek8smcp.io_kubernetesmcpservers.yaml
+helm upgrade --install supek8smcp https://github.com/SamuelSupe/supek8smcp/releases/download/v0.5.1/supek8smcp-0.5.1.tgz \
   --namespace supek8smcp-system --create-namespace
 ```
 
@@ -117,7 +118,7 @@ Create a dedicated endpoint namespace first. Anyone who can create a Pod there m
 
 ```bash
 make install
-make deploy IMG=ghcr.io/your-org/supek8smcp:0.5.0
+make deploy IMG=ghcr.io/your-org/supek8smcp:0.5.1
 kubectl create namespace supek8smcp-servers
 ```
 
@@ -157,7 +158,7 @@ Use `status.endpoint` and the CA from `status.caConfigMapName`; send a short-liv
 Build and publish an immutable image, then install the CRD and Operator:
 
 ```bash
-export IMG=registry.example.com/platform/supek8smcp:0.5.0
+export IMG=registry.example.com/platform/supek8smcp:0.5.1
 make docker-build IMG="$IMG"
 docker push "$IMG"
 make install
@@ -179,7 +180,7 @@ make fmt
 make vet
 make test
 make build
-make docker-build IMG=ghcr.io/your-org/supek8smcp:0.5.0
+make docker-build IMG=ghcr.io/your-org/supek8smcp:0.5.1
 ```
 
 Use `make manifests` when API types change; review generated YAML rather than editing it by hand. Release images should use immutable tags or digests and be published through the repository's release automation. See [`CHANGELOG.md`](CHANGELOG.md), [`CONTRIBUTING.md`](CONTRIBUTING.md), and [`SECURITY.md`](SECURITY.md) before opening a change or reporting a vulnerability.
