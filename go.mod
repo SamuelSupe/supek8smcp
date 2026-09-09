@@ -4,9 +4,9 @@ go 1.25.13
 
 require (
 	github.com/google/jsonschema-go v0.4.3
-	github.com/modelcontextprotocol/go-sdk v1.6.1
+	github.com/modelcontextprotocol/go-sdk v1.7.0
 	github.com/prometheus/client_golang v1.22.0
-	golang.org/x/time v0.9.0
+	golang.org/x/time v0.15.0
 	k8s.io/api v0.34.8
 	k8s.io/apimachinery v0.34.8
 	k8s.io/client-go v0.34.8
